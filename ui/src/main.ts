@@ -1,12 +1,14 @@
 // Wire the panels to ipc. No business logic — every action is a backend call,
 // every notification is a backend event.
 
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { ipc, onCoreEvent, type CoreDiagnostic, type CoreEvent, type RecentProject, type WorkspaceInfo } from "./ipc";
 import { mountEditor } from "./editor";
-import { mountTabs } from "./tabs";
-import { mountExplorer } from "./explorer";
+import { mountTabs, isTemporaryPath, type Tab } from "./tabs";
+import { mountExplorer, type ScratchEntry, type ScratchFile, type ScratchFolder } from "./explorer";
+import { confirmSave, promptName, type SaveDecision } from "./modal";
 import { mountTerminal } from "./terminal";
 import { mountProblems, type ProblemEntry } from "./problems";
 import {
@@ -32,6 +34,13 @@ function debugRecentProjects(message: string, details?: Record<string, unknown>)
   }
 }
 
+interface TempWorkspace {
+  id: number;
+  name: string;
+  rootPath: string;
+  children: ScratchEntry[];
+}
+
 async function bootstrap() {
   let activePtyId: string | null = null;
   let changeTimer: number | null = null;
@@ -41,11 +50,13 @@ async function bootstrap() {
   const diagnostics = new Map<string, { path: string; items: CoreDiagnostic[] }>();
 
   const editor = mountEditor($("editor"), () => {
+    tabs.updateActiveContent(editor.getDoc());
+    syncActiveScratchFile();
     tabs.markDirty(true);
     scheduleDidChange();
   });
   const tabs = mountTabs($("tabs"));
-  const explorer = mountExplorer($("panel-explorer"));
+  const explorer = mountExplorer($("explorer-tree"));
   const terminal = mountTerminal($("terminal"));
   const problems = mountProblems($("problems"));
   const editorHost = $("editor");
@@ -59,8 +70,39 @@ async function bootstrap() {
     terminalFocused = focused;
   });
 
+  // ── IDE-wide zoom ────────────────────────────────────────────────────────
+  const ZOOM_MIN  = 0.8;
+  const ZOOM_MAX  = 1.5;
+  const ZOOM_STEP = 0.1;
+  const ZOOM_KEY  = "customide.zoom";
+
+  let zoomLevel: number = (() => {
+    const v = parseFloat(localStorage.getItem(ZOOM_KEY) ?? "1");
+    return Number.isFinite(v) ? Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, v)) : 1;
+  })();
+
+  function applyZoom(z: number): void {
+    zoomLevel = Math.round(Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, z)) * 100) / 100;
+    // Scale the whole IDE via CSS zoom on the root element.
+    document.documentElement.style.zoom = String(zoomLevel);
+    // Compensate #app's height so it still fills exactly one viewport after zoom.
+    const appEl = document.getElementById("app")!;
+    appEl.style.height = zoomLevel !== 1 ? `${(100 / zoomLevel).toFixed(4)}vh` : "";
+    // Counter-zoom the xterm host so xterm renders at native pixel density.
+    // terminal.setZoom() then scales the font size to match the visual zoom level.
+    const termEl = document.getElementById("terminal");
+    if (termEl) termEl.style.zoom = zoomLevel !== 1 ? String(1 / zoomLevel) : "";
+    terminal.setZoom(zoomLevel);
+    localStorage.setItem(ZOOM_KEY, zoomLevel.toFixed(2));
+  }
+
+  // Apply persisted zoom synchronously — happens before first paint, no flicker.
+  applyZoom(zoomLevel);
+
   let currentWorkspace: WorkspaceInfo | null = null;
   let recentProjects: RecentProject[] = [];
+  let scratchWorkspace: TempWorkspace | null = null;
+  let scratchWorkspaceCounter = 0;
 
   function getLocalRecentProjects(): RecentProject[] {
     try {
@@ -134,11 +176,129 @@ async function bootstrap() {
     return file === root || file.startsWith(`${root}/`);
   }
 
+  function joinPath(parent: string, name: string) {
+    const sep = parent.includes("\\") && !parent.includes("/") ? "\\" : "/";
+    return `${parent.replace(/[\\/]+$/, "")}${sep}${name}`;
+  }
+
+  function scratchWorkspaceRoot(): ScratchFolder | null {
+    if (!scratchWorkspace) return null;
+    return {
+      kind: "folder",
+      name: scratchWorkspace.name,
+      path: scratchWorkspace.rootPath,
+      children: scratchWorkspace.children,
+    };
+  }
+
+  function scratchChildExists(parent: ScratchFolder, name: string) {
+    const key = name.toLowerCase();
+    return parent.children.some((child) => child.name.toLowerCase() === key);
+  }
+
+  function findScratchFile(path: string): ScratchFile | null {
+    if (!scratchWorkspace) return null;
+    const stack = [...scratchWorkspace.children];
+    while (stack.length > 0) {
+      const entry = stack.shift()!;
+      if (entry.kind === "file" && normPath(entry.path) === normPath(path)) {
+        return entry;
+      }
+      if (entry.kind === "folder") {
+        stack.push(...entry.children);
+      }
+    }
+    return null;
+  }
+
+  function openScratchFile(path: string) {
+    const file = findScratchFile(path);
+    if (!file) return;
+    tabs.openVirtualFile(file.path, file.name, file.content);
+  }
+
+  function syncActiveScratchFile() {
+    const active = tabs.active();
+    if (!active || !isTemporaryPath(active.path)) return;
+    tabs.updateActiveContent(editor.getDoc());
+    const file = findScratchFile(active.path);
+    if (file) {
+      file.content = editor.getDoc();
+    }
+  }
+
+  function syncScratchTabs() {
+    syncActiveScratchFile();
+    if (!scratchWorkspace) return;
+    for (const tab of tabs.all()) {
+      const file = findScratchFile(tab.path);
+      if (file) {
+        file.content = tab.content;
+      }
+    }
+  }
+
+  function scratchRelativePath(path: string) {
+    if (!scratchWorkspace) return path;
+    return path
+      .slice(scratchWorkspace.rootPath.length)
+      .replace(/^[\\/]+/, "");
+  }
+
+  async function writeScratchEntry(destRoot: string, entry: ScratchEntry) {
+    const dest = joinPath(destRoot, scratchRelativePath(entry.path));
+    if (entry.kind === "folder") {
+      await ipc.fsCreateDir(dest);
+      for (const child of entry.children) {
+        await writeScratchEntry(destRoot, child);
+      }
+      return;
+    }
+    await ipc.fsWrite(dest, entry.content);
+  }
+
+  async function saveScratchWorkspace(): Promise<boolean> {
+    if (!scratchWorkspace) return false;
+    syncScratchTabs();
+    const scratch = scratchWorkspace;
+    const active = tabs.active();
+    const activeScratchFile = active ? findScratchFile(active.path) : null;
+    const activeRelativePath = activeScratchFile ? scratchRelativePath(activeScratchFile.path) : null;
+
+    const picked = await openDialog({
+      title: "Save Scratch Workspace",
+      directory: true,
+      multiple: false,
+    });
+    if (!picked || Array.isArray(picked)) return false;
+
+    const destRoot = joinPath(picked, scratch.name);
+    try {
+      await ipc.fsCreateDir(destRoot);
+      for (const child of scratch.children) {
+        await writeScratchEntry(destRoot, child);
+      }
+      scratchWorkspace = null;
+      const opened = await openWorkspace(destRoot, false, true);
+      if (opened && activeRelativePath) {
+        await tabs.open(joinPath(destRoot, activeRelativePath));
+      }
+      return opened;
+    } catch (e) {
+      terminal.log(`save scratch workspace failed: ${String(e)}`);
+      return false;
+    }
+  }
+
+  function hasUnsavedWork() {
+    return tabs.hasUnsavedChanges() || scratchWorkspace !== null;
+  }
+
   function workspaceTabPaths(workspaceRoot: string) {
     return tabs
       .all()
       .map((tab) => tab.path)
-      .filter((path) => pathBelongsToWorkspace(path, workspaceRoot));
+      .filter((path) => !isTemporaryPath(path) && pathBelongsToWorkspace(path, workspaceRoot));
   }
 
   async function persistWorkspaceTabState() {
@@ -147,7 +307,11 @@ async function bootstrap() {
     await ipc.workspaceOpenFilesSet(currentWorkspace.root, openFiles);
 
     const active = tabs.active();
-    if (active && pathBelongsToWorkspace(active.path, currentWorkspace.root)) {
+    if (
+      active &&
+      !isTemporaryPath(active.path) &&
+      pathBelongsToWorkspace(active.path, currentWorkspace.root)
+    ) {
       await ipc.workspaceLastActiveFileSet(currentWorkspace.root, active.path);
     }
   }
@@ -157,15 +321,68 @@ async function bootstrap() {
     await persistRecentProjects();
   }
 
-  async function openWorkspace(path: string, restoreLastActiveFile = false) {
+  function updateWorkspaceUi(info: WorkspaceInfo | null) {
+    const workspaceLabel = $("workspace-label");
+    const pythonSpan = $("statusbar-python-text");
+    if (scratchWorkspace) {
+      if (workspaceLabel) {
+        workspaceLabel.innerHTML = `
+          <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+          </svg>
+          <span>${scratchWorkspace.name} (unsaved)</span>
+        `;
+      }
+      if (pythonSpan) {
+        pythonSpan.textContent = "Scratch workspace";
+      }
+    } else if (info) {
+      if (workspaceLabel) {
+        workspaceLabel.innerHTML = `
+          <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+          </svg>
+          <span>${info.name}</span>
+        `;
+      }
+      if (pythonSpan) {
+        pythonSpan.textContent = info.python ? `${info.python.interpreter} (${info.python.version ?? "?"})` : "No python";
+      }
+    } else {
+      if (workspaceLabel) {
+        workspaceLabel.innerHTML = `
+          <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+            <line x1="8" y1="21" x2="16" y2="21"></line>
+            <line x1="12" y1="17" x2="12" y2="21"></line>
+          </svg>
+          No workspace
+        `;
+      }
+      if (pythonSpan) {
+        pythonSpan.textContent = "No python";
+      }
+    }
+  }
+
+  async function openWorkspace(path: string, restoreLastActiveFile = false, skipUnsavedConfirm = false): Promise<boolean> {
+    if (!skipUnsavedConfirm && !(await confirmDiscardAllUnsaved("Switching workspace will close all open files."))) {
+      return false;
+    }
+    // Drop any leftover tabs (untitled or dirty) before swapping workspace.
+    for (const tab of tabs.all()) {
+      tabs.close(tab.path);
+    }
     diagnostics.clear();
     editor.setDiagnostics([]);
     refreshProblems();
 
     try {
       const info = await ipc.workspaceOpen(path);
+      scratchWorkspace = null;
+      explorer.clearScratchRoot();
       currentWorkspace = info;
-      $("workspace-label").textContent = `${info.name} — ${info.python?.interpreter ?? "no python"}`;
+      updateWorkspaceUi(info);
       await explorer.setRoot(info.root);
       terminal.log(
         `Workspace opened: ${info.root}` +
@@ -176,9 +393,71 @@ async function bootstrap() {
         await restoreWorkspaceTabs(info.root);
       }
       renderEmptyState();
+      return true;
     } catch (e) {
       terminal.log(`Failed to open workspace: ${String(e)}`);
+      return false;
     }
+  }
+
+  async function createFileFromEmptyState() {
+    const name = await promptName({
+      title: "New File",
+      label: "File name",
+      initialValue: "untitled.py",
+    });
+    if (!name) return;
+
+    if (scratchWorkspace) {
+      const root = scratchWorkspaceRoot();
+      if (!root || scratchChildExists(root, name)) {
+        terminal.log(`new file failed: ${name} already exists`);
+        return;
+      }
+      const file: ScratchFile = {
+        kind: "file",
+        name,
+        path: joinPath(scratchWorkspace.rootPath, name),
+        content: "",
+      };
+      scratchWorkspace.children.unshift(file);
+      explorer.setScratchRoot(scratchWorkspace.name, scratchWorkspace.rootPath, scratchWorkspace.children);
+      openScratchFile(file.path);
+      return;
+    }
+
+    tabs.openTemporaryFile(name);
+  }
+
+  async function createFolderFromEmptyState() {
+    const name = await promptName({
+      title: "New Folder",
+      label: "Folder name",
+      initialValue: "New Folder",
+    });
+    if (!name) return;
+
+    if (!(await confirmDiscardAllUnsaved("Starting a scratch workspace will close current open files."))) {
+      return;
+    }
+    for (const tab of tabs.all()) {
+      tabs.close(tab.path);
+    }
+    currentWorkspace = null;
+    diagnostics.clear();
+    editor.setDiagnostics([]);
+    refreshProblems();
+
+    scratchWorkspaceCounter += 1;
+    scratchWorkspace = {
+      id: scratchWorkspaceCounter,
+      name,
+      rootPath: `scratch:${scratchWorkspaceCounter}`,
+      children: [],
+    };
+    explorer.setScratchRoot(scratchWorkspace.name, scratchWorkspace.rootPath, scratchWorkspace.children);
+    updateWorkspaceUi(null);
+    showEditor(false);
   }
 
   async function restoreWorkspaceTabs(workspaceRoot: string) {
@@ -230,7 +509,7 @@ async function bootstrap() {
     }
 
     const recents = recentProjects;
-    const shouldShowRecents = !currentWorkspace && recents.length > 0;
+    const shouldShowRecents = !currentWorkspace && !scratchWorkspace && recents.length > 0;
     debugRecentProjects("render empty state", {
       currentWorkspace: currentWorkspace?.root ?? null,
       count: recents.length,
@@ -355,10 +634,11 @@ async function bootstrap() {
   function scheduleDidChange() {
     const tab = tabs.active();
     if (!tab) return;
+    if (isTemporaryPath(tab.path)) return;
     if (changeTimer) window.clearTimeout(changeTimer);
     changeTimer = window.setTimeout(() => {
       const cur = tabs.active();
-      if (!cur) return;
+      if (!cur || isTemporaryPath(cur.path)) return;
       ipc.docDidChange(cur.path, editor.getDoc()).catch(() => {});
     }, 250);
   }
@@ -371,8 +651,17 @@ async function bootstrap() {
 
   function refreshProblems() {
     const flat: ProblemEntry[] = [];
+    let errorsCount = 0;
+    let warningsCount = 0;
     for (const { path, items } of diagnostics.values()) {
-      for (const d of items) flat.push({ path, diagnostic: d });
+      for (const d of items) {
+        flat.push({ path, diagnostic: d });
+        if (d.severity === "error") {
+          errorsCount++;
+        } else if (d.severity === "warning") {
+          warningsCount++;
+        }
+      }
     }
     // Stable sort: by file, then line.
     flat.sort((a, b) => {
@@ -381,6 +670,12 @@ async function bootstrap() {
       return a.diagnostic.range.start.line - b.diagnostic.range.start.line;
     });
     problems.setEntries(flat);
+    
+    // Update statusbar diagnostic counters!
+    const errCountSpan = $("statusbar-error-count");
+    const warnCountSpan = $("statusbar-warning-count");
+    if (errCountSpan) errCountSpan.textContent = errorsCount.toString();
+    if (warnCountSpan) warnCountSpan.textContent = warningsCount.toString();
   }
 
   tabs.onActiveChange((tab) => {
@@ -406,7 +701,7 @@ async function bootstrap() {
   tabs.open = async (path: string) => {
     const isNew = !tabs.all().some((t) => t.path === path);
     await baseOpen(path);
-    if (isNew && /\.pyi?$/i.test(path)) {
+    if (isNew && !isTemporaryPath(path) && /\.pyi?$/i.test(path)) {
       const cur = tabs.active();
       if (cur && cur.path === path) {
         ipc.docDidOpen(path, cur.content).catch(() => {});
@@ -418,24 +713,173 @@ async function bootstrap() {
   // tabs.close -> notify Pyright + drop local diagnostics for that path.
   const baseClose = tabs.close.bind(tabs);
   tabs.close = (path: string) => {
-    if (/\.pyi?$/i.test(path)) ipc.docDidClose(path).catch(() => {});
+    if (!isTemporaryPath(path) && /\.pyi?$/i.test(path)) {
+      ipc.docDidClose(path).catch(() => {});
+    }
     diagnostics.delete(normPath(path));
     refreshProblems();
     baseClose(path);
     persistWorkspaceTabState().catch(() => {});
   };
 
+  // Confirming close wraps the wrapped close, so the modal sits in front of
+  // the pyright/persistence side-effects.
+  async function closeTabWithConfirm(path: string): Promise<boolean> {
+    const tab = tabs.all().find((t) => t.path === path);
+    if (!tab) return true;
+    if (!tab.dirty) {
+      tabs.close(path);
+      return true;
+    }
+    const decision = await confirmSave({
+      title: `Save changes to ${tab.name}?`,
+      message: "Your changes will be lost if you don't save them.",
+    });
+    if (decision === "cancel") return false;
+    if (decision === "discard") {
+      tabs.close(path);
+      return true;
+    }
+    // "save" — if active, use editor text; otherwise persist last-known content.
+    const wasActive = tabs.active()?.path === path;
+    const wasScratch = Boolean(scratchWorkspace && findScratchFile(path));
+    if (!wasActive) tabs.setActive(path);
+    const saved = await saveActiveWithDialog();
+    if (!saved) return false;
+    if (tabs.all().some((t) => t.path === path)) {
+      tabs.close(path);
+    } else if (!wasScratch) {
+      const current = tabs.active();
+      if (current) tabs.close(current.path);
+    }
+    return true;
+  }
+
   // tabs.saveActive -> notify Pyright with new text.
   const baseSave = tabs.saveActive.bind(tabs);
   tabs.saveActive = async (text: string) => {
     const active = tabs.active();
     await baseSave(text);
-    if (active && /\.pyi?$/i.test(active.path)) {
+    if (active && !isTemporaryPath(active.path) && /\.pyi?$/i.test(active.path)) {
       ipc.docDidSave(active.path, text).catch(() => {});
     }
   };
 
-  explorer.onOpenFile((path) => tabs.open(path));
+  // Save current tab. Routes untitled tabs through the save() dialog; converts
+  // them into real on-disk files on success. Returns true if persisted.
+  async function saveActiveWithDialog(): Promise<boolean> {
+    const active = tabs.active();
+    if (!active && scratchWorkspace) {
+      return saveScratchWorkspace();
+    }
+    if (!active) return false;
+    if (scratchWorkspace && findScratchFile(active.path)) {
+      return saveScratchWorkspace();
+    }
+    if (!isTemporaryPath(active.path)) {
+      await tabs.saveActive(editor.getDoc());
+      return true;
+    }
+    const defaultPath = currentWorkspace
+      ? joinPath(currentWorkspace.root, active.name)
+      : active.name;
+    const picked = await saveDialog({
+      defaultPath,
+      filters: [
+        { name: "Python", extensions: ["py", "pyi"] },
+        { name: "All Files", extensions: ["*"] },
+      ],
+    });
+    if (!picked) return false;
+    const contents = editor.getDoc();
+    try {
+      await tabs.relocate(active.path, picked, contents);
+    } catch (e) {
+      terminal.log(`save failed: ${String(e)}`);
+      return false;
+    }
+    if (/\.pyi?$/i.test(picked)) {
+      ipc.docDidOpen(picked, contents).catch(() => {});
+    }
+    persistWorkspaceTabState().catch(() => {});
+    return true;
+  }
+
+  // Walks every dirty tab, prompting once per tab. Returns false if user
+  // cancels at any step. Used by workspace switch and window close.
+  async function confirmDiscardAllUnsaved(reason: string): Promise<boolean> {
+    if (!hasUnsavedWork()) return true;
+    if (scratchWorkspace) {
+      const decision = await confirmSave({
+        title: `Save ${scratchWorkspace.name}?`,
+        message: `${reason} Your scratch workspace exists only in memory until it is saved.`,
+      });
+      return resolveBulkDecision(decision, tabs.all().filter((t) => t.dirty));
+    }
+    const dirty: Tab[] = tabs.all().filter((t) => t.dirty);
+    if (dirty.length === 1) {
+      const t = dirty[0];
+      const decision = await confirmSave({
+        title: `Save changes to ${t.name}?`,
+        message: `${reason} Your changes will be lost if you don't save them.`,
+      });
+      return resolveBulkDecision(decision, [t]);
+    }
+    const decision = await confirmSave({
+      title: `Save changes to ${dirty.length} files?`,
+      message: `${reason} Unsaved files:\n${dirty.map((t) => "  • " + t.name).join("\n")}`,
+    });
+    return resolveBulkDecision(decision, dirty);
+  }
+
+  async function resolveBulkDecision(decision: SaveDecision, dirty: Tab[]): Promise<boolean> {
+    if (decision === "cancel") return false;
+    if (decision === "discard") return true;
+    if (scratchWorkspace) {
+      return saveScratchWorkspace();
+    }
+    // Save each. For untitled tabs the save dialog opens; cancel aborts.
+    for (const t of dirty) {
+      tabs.setActive(t.path);
+      const ok = await saveActiveWithDialog();
+      if (!ok) return false;
+    }
+    return true;
+  }
+
+  explorer.onOpenFile((path) => {
+    if (isTemporaryPath(path)) {
+      openScratchFile(path);
+      return;
+    }
+    tabs.open(path);
+  });
+  explorer.onFileCreated((path) => {
+    if (isTemporaryPath(path)) {
+      openScratchFile(path);
+      return;
+    }
+    tabs.open(path).catch((e) => terminal.log(`open failed: ${String(e)}`));
+  });
+
+  tabs.onCloseRequest((path) => {
+    closeTabWithConfirm(path).catch(() => {});
+  });
+
+  const btnNewFile = document.getElementById("btn-new-file");
+  if (btnNewFile) {
+    btnNewFile.onclick = () => {
+      if (!currentWorkspace && !scratchWorkspace) return;
+      explorer.beginCreate("file").catch(() => {});
+    };
+  }
+  const btnNewFolder = document.getElementById("btn-new-folder");
+  if (btnNewFolder) {
+    btnNewFolder.onclick = () => {
+      if (!currentWorkspace && !scratchWorkspace) return;
+      explorer.beginCreate("folder").catch(() => {});
+    };
+  }
 
   problems.onJump(async (path, line, col) => {
     await tabs.open(path);
@@ -459,11 +903,30 @@ async function bootstrap() {
     };
   }
 
+  const btnEmptyNewFile = $("btn-empty-new-file");
+  if (btnEmptyNewFile) {
+    btnEmptyNewFile.onclick = () => {
+      createFileFromEmptyState().catch((e) => terminal.log(`new file failed: ${String(e)}`));
+    };
+  }
+
+  const btnEmptyNewFolder = $("btn-empty-new-folder");
+  if (btnEmptyNewFolder) {
+    btnEmptyNewFolder.onclick = () => {
+      createFolderFromEmptyState().catch((e) => terminal.log(`new folder failed: ${String(e)}`));
+    };
+  }
+
   $("btn-save").onclick = async () => {
-    const active = tabs.active();
-    if (!active) return;
-    await tabs.saveActive(editor.getDoc());
+    await saveActiveWithDialog();
   };
+
+  const btnClearTerminal = $("btn-clear-terminal");
+  if (btnClearTerminal) {
+    btnClearTerminal.onclick = () => {
+      terminal.clear();
+    };
+  }
 
   // Push current size to PTY whenever the terminal resizes.
   terminal.onResize((cols, rows) => {
@@ -490,6 +953,13 @@ async function bootstrap() {
   };
 
   async function runFile(path: string) {
+    if (isTemporaryPath(path)) {
+      const saved = await saveActiveWithDialog();
+      if (!saved) return;
+      const savedActive = tabs.active();
+      if (!savedActive || isTemporaryPath(savedActive.path)) return;
+      path = savedActive.path;
+    }
     const active = tabs.active();
     if (active && normPath(active.path) === normPath(path) && active.dirty) {
       await tabs.saveActive(editor.getDoc());
@@ -609,10 +1079,13 @@ async function bootstrap() {
 
     if (evt.kind === "workspace_closed") {
       currentWorkspace = null;
+      scratchWorkspace = null;
+      explorer.clearScratchRoot();
       diagnostics.clear();
       editor.setDiagnostics([]);
       refreshProblems();
       renderEmptyState();
+      updateWorkspaceUi(null);
     }
 
     if (evt.kind === "log") {
@@ -638,7 +1111,7 @@ async function bootstrap() {
     }
   }
 
-  // Keyboard: Ctrl/Cmd+S = save
+  // Keyboard: Ctrl/Cmd+S = save, Ctrl/Cmd+N = new untitled file
   window.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
       hideRunTargetPopover();
@@ -649,7 +1122,35 @@ async function bootstrap() {
       e.preventDefault();
       $("btn-save").click();
     }
+    if (mod && e.key.toLowerCase() === "n") {
+      e.preventDefault();
+      createFileFromEmptyState().catch((err) => terminal.log(`new file failed: ${String(err)}`));
+    }
+    if (mod && e.key.toLowerCase() === "w") {
+      const active = tabs.active();
+      if (active) {
+        e.preventDefault();
+        closeTabWithConfirm(active.path).catch(() => {});
+      }
+    }
   });
+
+  // Zoom shortcuts — capture phase fires before xterm's own keydown listeners,
+  // so Ctrl+Plus/Minus/0 are intercepted even when the terminal has focus.
+  // stopPropagation() prevents the keys from reaching xterm and the PTY.
+  window.addEventListener("keydown", (e) => {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    const k = e.key;
+    const zoomIn  = k === "+" || k === "="; // "=" = unshifted Plus key
+    const zoomOut = k === "-";
+    const reset   = k === "0";
+    if (!zoomIn && !zoomOut && !reset) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (zoomIn)       applyZoom(zoomLevel + ZOOM_STEP);
+    else if (zoomOut) applyZoom(zoomLevel - ZOOM_STEP);
+    else              applyZoom(1.0);
+  }, /* capture */ true);
 
   document.addEventListener("mousedown", (e) => {
     const target = e.target as Node;
@@ -673,7 +1174,7 @@ async function bootstrap() {
     bottomHeight = Math.max(80, Math.min(bottomHeight, window.innerHeight - 150));
 
     body.style.gridTemplateColumns = `${sidebarWidth}px 1px 1fr`;
-    app.style.gridTemplateRows = `36px 1fr 1px ${bottomHeight}px`;
+    app.style.gridTemplateRows = `35px 1fr 1px ${bottomHeight}px 22px`;
 
     sidebarResizer.onmousedown = (e) => {
       e.preventDefault();
@@ -712,7 +1213,7 @@ async function bootstrap() {
         let newHeight = startHeight - deltaY;
         newHeight = Math.max(80, Math.min(newHeight, window.innerHeight - 150));
         bottomHeight = newHeight;
-        app.style.gridTemplateRows = `36px 1fr 1px ${newHeight}px`;
+        app.style.gridTemplateRows = `35px 1fr 1px ${newHeight}px 22px`;
         terminal.fit();
       };
 
@@ -732,7 +1233,7 @@ async function bootstrap() {
       const maxBottomHeight = window.innerHeight - 150;
       if (bottomHeight > maxBottomHeight) {
         bottomHeight = Math.max(80, maxBottomHeight);
-        app.style.gridTemplateRows = `36px 1fr 1px ${bottomHeight}px`;
+        app.style.gridTemplateRows = `35px 1fr 1px ${bottomHeight}px 22px`;
       }
       terminal.fit();
     });
@@ -743,6 +1244,40 @@ async function bootstrap() {
   await loadRecentProjects();
   renderEmptyState();
 
+  // Block the window from closing if there are unsaved changes.
+  // IMPORTANT: event.preventDefault() must be called synchronously before
+  // any awaits — Tauri 2 checks it on the same tick, not after the promise
+  // resolves. We therefore always prevent and call destroy() ourselves when
+  // ready to close.
+  try {
+    const appWindow = getCurrentWindow();
+    let handling = false;
+    const destroyWindow = async () => {
+      try {
+        await appWindow.destroy();
+      } catch (e) {
+        console.error("Could not destroy window after close request", e);
+      }
+    };
+    await appWindow.onCloseRequested(async (event) => {
+      // Always take control; we'll call destroy() when it's safe to close.
+      event.preventDefault();
+      if (handling) return; // re-entrant guard (shouldn't happen with destroy())
+      if (!hasUnsavedWork()) {
+        await destroyWindow();
+        return;
+      }
+      handling = true;
+      const ok = await confirmDiscardAllUnsaved("The IDE is closing.");
+      handling = false;
+      if (ok) {
+        await destroyWindow();
+      }
+    });
+  } catch (e) {
+    console.error("Could not attach close handler", e);
+  }
+
   // Check if a workspace is already open on startup
   ipc.workspaceInfo().then((info) => {
     debugRecentProjects("startup workspaceInfo resolved", {
@@ -751,7 +1286,7 @@ async function bootstrap() {
     });
     if (info) {
       currentWorkspace = info;
-      $("workspace-label").textContent = `${info.name} — ${info.python?.interpreter ?? "no python"}`;
+      updateWorkspaceUi(info);
       explorer.setRoot(info.root).catch(() => {});
       debugRecentProjects("startup workspace found; recording recent project", {
         path: info.root,

@@ -31,6 +31,22 @@
   - **Evidence**: Relaunch trace before the fix showed backend returned one project and frontend loaded it, then skipped render with `hasShortcutsSection:false`; after the selector fix the trace showed `listChildren:1`, `recentSectionHidden:false`, `shortcutsHidden:true`, and `editorEmptyStateHidden:false`.
   - **Status**: Fixed (unverified)
 
+- [ ] **BUG-5: Window close button is blocked by denied destroy permission** - `High`
+  - **File**: `ui/src/main.ts` (close handler), `crates/ide-shell/capabilities/default.json`
+  - **Issue**: Pressing the native window X does not close the IDE.
+  - **Probable cause**: The close handler synchronously calls `event.preventDefault()` for every close request, then calls `appWindow.destroy()` after unsaved-change checks; the Tauri capability file granted `core:window:default` but not `core:window:allow-destroy`, so the manual close path was denied after the native close was already blocked.
+  - **Fix**: Grant `core:window:allow-destroy` and log any future manual destroy failures.
+  - **Evidence**: Source inspection showed the always-prevent close handler and missing destroy capability; after rebuilding, a runtime `CloseMainWindow()` verification exited the app with code 0.
+  - **Status**: Fixed (unverified)
+
+- [ ] **BUG-6: Startup New File/New Folder opens filesystem dialogs too early** - `Medium`
+  - **File**: `ui/src/main.ts`, `ui/src/explorer.ts`, `ui/src/tabs.ts`, `ui/src/modal.ts`
+  - **Issue**: The start-screen New File/New Folder quick actions immediately opened native filesystem dialogs instead of letting users create temporary in-IDE work first.
+  - **Probable cause**: The quick actions were wired directly to `saveDialog` plus `fsCreateFile` / `fsCreateDir`, so creation was filesystem-first rather than scratch-first.
+  - **Fix**: Add in-IDE naming prompts, temporary file tabs, a frontend-only scratch explorer mode, and deferred save behavior that writes temporary work only when the user saves or confirms close/switch.
+  - **Evidence**: `npm run build` and `cargo check` pass after replacing the startup quick-action path with temporary-first creation.
+  - **Status**: Fixed (unverified)
+
 ## Needs Confirmation
 
 ## Resolved Issues

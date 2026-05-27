@@ -101,6 +101,8 @@ export const ipc = {
   fsRead: (path: string) => invoke<string>("cmd_fs_read", { path }),
   fsWrite: (path: string, contents: string) =>
     invoke<void>("cmd_fs_write", { path, contents }),
+  fsCreateFile: (path: string) => invoke<void>("cmd_fs_create_file", { path }),
+  fsCreateDir: (path: string) => invoke<void>("cmd_fs_create_dir", { path }),
   pythonRun: (
     file: string,
     args: string[] = [],

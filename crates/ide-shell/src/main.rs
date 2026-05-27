@@ -83,6 +83,8 @@ fn main() {
             cmd_fs_list,
             cmd_fs_read,
             cmd_fs_write,
+            cmd_fs_create_file,
+            cmd_fs_create_dir,
             cmd_pty_open,
             cmd_python_run,
             cmd_process_kill,
@@ -364,6 +366,16 @@ fn cmd_fs_read(state: State<'_, AppState>, path: String) -> Result<String, Strin
 #[tauri::command]
 fn cmd_fs_write(state: State<'_, AppState>, path: String, contents: String) -> Result<(), String> {
     state.fs.write(Path::new(&path), &contents).map_err(to_err)
+}
+
+#[tauri::command]
+fn cmd_fs_create_file(state: State<'_, AppState>, path: String) -> Result<(), String> {
+    state.fs.create_file(Path::new(&path)).map_err(to_err)
+}
+
+#[tauri::command]
+fn cmd_fs_create_dir(state: State<'_, AppState>, path: String) -> Result<(), String> {
+    state.fs.create_dir(Path::new(&path)).map_err(to_err)
 }
 
 // ---------- Python run ----------
