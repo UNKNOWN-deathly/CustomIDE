@@ -63,7 +63,12 @@ impl PtyManager {
             .map_err(|e| IdeError::other(format!("pty open: {e}")))?;
 
         let program = spec.program.unwrap_or_else(default_shell);
-        let mut cmd = CommandBuilder::new(program);
+        let display = if spec.args.is_empty() {
+            program.clone()
+        } else {
+            format!("{} {}", program, spec.args.join(" "))
+        };
+        let mut cmd = CommandBuilder::new(&program);
         for a in &spec.args {
             cmd.arg(a);
         }
@@ -96,6 +101,8 @@ impl PtyManager {
             _child: child,
         }));
         self.sessions.lock().insert(id.clone(), session);
+
+        self.bus.publish(Event::ProcessStarted { id: id.clone(), cmd: display });
 
         let bus = self.bus.clone();
         let id_for_pump = id.clone();

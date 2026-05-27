@@ -23,10 +23,46 @@ pub enum Event {
     ProcessStarted { id: String, cmd: String },
     ProcessOutput { id: String, stream: OutputStream, line: String },
     ProcessExited { id: String, code: Option<i32> },
-    Diagnostics { path: PathBuf, count: usize },
+    /// Push of full diagnostic set for a single file from a single source
+    /// (e.g. "pyright", "ruff"). An empty `items` clears that file+source pair.
+    Diagnostics {
+        path: PathBuf,
+        source: String,
+        items: Vec<Diagnostic>,
+    },
     TestRunStarted { id: String },
     TestRunFinished { id: String, passed: usize, failed: usize },
     Log { level: LogLevel, message: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticSeverity {
+    Error,
+    Warning,
+    Info,
+    Hint,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct Position {
+    pub line: u32,
+    pub character: u32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct Range {
+    pub start: Position,
+    pub end: Position,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Diagnostic {
+    pub severity: DiagnosticSeverity,
+    pub message: String,
+    pub code: Option<String>,
+    pub source: Option<String>,
+    pub range: Range,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

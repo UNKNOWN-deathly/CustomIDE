@@ -100,6 +100,20 @@ impl LspClient {
         write_message(&mut *self.stdin.lock(), &msg)
     }
 
+    /// Reply to a server-initiated request. Used by reader threads handling
+    /// things like `workspace/configuration` and `client/registerCapability`.
+    pub fn respond(&self, id: &Value, result: Value) -> IdeResult<()> {
+        let msg = json!({ "jsonrpc": "2.0", "id": id, "result": result });
+        write_message(&mut *self.stdin.lock(), &msg)
+    }
+
+    /// Cheap handle: a shared writer that can `notify` / `respond` without
+    /// holding the whole [`LspClient`]. Use this in background reader threads
+    /// so they can answer server-initiated requests without locking the client.
+    pub fn responder(&self) -> LspResponder {
+        LspResponder { stdin: self.stdin.clone() }
+    }
+
     pub fn request(&self, method: &str, params: Value) -> IdeResult<Receiver<IdeResult<Value>>> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = unbounded();
@@ -176,6 +190,24 @@ fn read_message<R: BufRead>(r: &mut R) -> IdeResult<Option<ServerMessage>> {
     Ok(Some(msg))
 }
 
+/// Shared writer half of an [`LspClient`]. Cheap to clone, safe across threads.
+#[derive(Clone)]
+pub struct LspResponder {
+    stdin: Arc<Mutex<ChildStdin>>,
+}
+
+impl LspResponder {
+    pub fn notify(&self, method: &str, params: Value) -> IdeResult<()> {
+        let msg = json!({ "jsonrpc": "2.0", "method": method, "params": params });
+        write_message(&mut *self.stdin.lock(), &msg)
+    }
+
+    pub fn respond(&self, id: &Value, result: Value) -> IdeResult<()> {
+        let msg = json!({ "jsonrpc": "2.0", "id": id, "result": result });
+        write_message(&mut *self.stdin.lock(), &msg)
+    }
+}
+
 pub fn path_to_uri(p: &Path) -> String {
     let abs: PathBuf = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
     let mut s = abs.to_string_lossy().replace('\\', "/");
@@ -186,5 +218,25 @@ pub fn path_to_uri(p: &Path) -> String {
         format!("file:///{s}")
     } else {
         format!("file://{s}")
+    }
+}
+
+/// Inverse of [`path_to_uri`]. Returns a path in the host OS form so it
+/// compares equal to paths obtained from the filesystem walker.
+pub fn uri_to_path(uri: &str) -> PathBuf {
+    let s = uri.strip_prefix("file://").unwrap_or(uri);
+    // On Windows file:///C:/... → C:/...
+    let s = if cfg!(windows) {
+        s.strip_prefix('/').unwrap_or(s)
+    } else {
+        s
+    };
+    // Percent-decode the bare minimum (colons + spaces) so Windows drive
+    // letters and common paths survive without pulling in a url crate.
+    let decoded = s.replace("%3A", ":").replace("%3a", ":").replace("%20", " ");
+    if cfg!(windows) {
+        PathBuf::from(decoded.replace('/', "\\"))
+    } else {
+        PathBuf::from(decoded)
     }
 }

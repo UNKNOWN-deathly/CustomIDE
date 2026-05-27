@@ -1,0 +1,280 @@
+//! Tauri shell — wires ide-core into a desktop app.
+//! Commands are thin wrappers; events from the EventBus are forwarded to the
+//! webview verbatim. No business logic lives in TypeScript.
+
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use serde::{Deserialize, Serialize};
+use tauri::{Emitter, State};
+use tracing_subscriber::EnvFilter;
+
+use ide_core::events::{Event as CoreEvent, EventBus, LogLevel};
+use ide_core::fs_service::{DirEntry, FsService};
+use ide_core::process::ProcessRunner;
+use ide_core::pty::{PtyManager, PtySpec};
+use ide_core::pyright::PyrightManager;
+use ide_core::python_env;
+use ide_core::ruff;
+use ide_core::workspace::{Workspace, WorkspaceInfo};
+
+struct AppState {
+    bus: EventBus,
+    workspace: Workspace,
+    fs: FsService,
+    runner: ProcessRunner,
+    pty: PtyManager,
+    pyright: PyrightManager,
+}
+
+fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_target(false)
+        .init();
+
+    let bus = EventBus::new();
+    let workspace = Workspace::new();
+    let fs = FsService::new(bus.clone());
+    let runner = ProcessRunner::new(bus.clone());
+    let pty = PtyManager::new(bus.clone());
+    let pyright = PyrightManager::new(bus.clone());
+
+    tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .manage(AppState {
+            bus: bus.clone(),
+            workspace,
+            fs,
+            runner,
+            pty,
+            pyright,
+        })
+        .setup(move |app| {
+            // Bridge ide-core events -> webview events.
+            let handle = app.handle().clone();
+            let rx = bus.subscribe();
+            std::thread::spawn(move || {
+                while let Ok(evt) = rx.recv() {
+                    let _ = handle.emit("core://event", &evt);
+                }
+            });
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            cmd_workspace_open,
+            cmd_workspace_info,
+            cmd_fs_list,
+            cmd_fs_read,
+            cmd_fs_write,
+            cmd_python_run,
+            cmd_process_kill,
+            cmd_pty_write,
+            cmd_pty_resize,
+            cmd_pty_close,
+            cmd_ruff_check,
+            cmd_doc_did_open,
+            cmd_doc_did_change,
+            cmd_doc_did_save,
+            cmd_doc_did_close,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
+
+fn to_err<E: std::fmt::Display>(e: E) -> String {
+    e.to_string()
+}
+
+// ---------- Workspace ----------
+
+#[tauri::command]
+fn cmd_workspace_open(state: State<'_, AppState>, path: String) -> Result<WorkspaceInfo, String> {
+    // Tear down any prior session before swapping workspaces.
+    state.pyright.stop();
+    let info = state.workspace.open(&path).map_err(to_err)?;
+    state.fs.watch(&info.root).ok();
+    state.bus.publish(CoreEvent::WorkspaceOpened { root: info.root.clone() });
+
+    // Best-effort: start Pyright if we have a python env and the binary is on PATH.
+    if let Some(env) = &info.python {
+        match state.pyright.start(&info.root, env) {
+            Ok(()) => state.bus.publish(CoreEvent::Log {
+                level: LogLevel::Info,
+                message: "pyright started".into(),
+            }),
+            Err(e) => state.bus.publish(CoreEvent::Log {
+                level: LogLevel::Warn,
+                message: format!(
+                    "pyright not started ({}). Install with `npm i -g pyright` or `pip install pyright` to enable live diagnostics.",
+                    e
+                ),
+            }),
+        }
+    } else {
+        state.bus.publish(CoreEvent::Log {
+            level: LogLevel::Warn,
+            message: "no Python interpreter detected; live diagnostics disabled".into(),
+        });
+    }
+
+    Ok(info)
+}
+
+#[tauri::command]
+fn cmd_workspace_info(state: State<'_, AppState>) -> Result<Option<WorkspaceInfo>, String> {
+    Ok(state.workspace.current())
+}
+
+// ---------- FS ----------
+
+#[tauri::command]
+fn cmd_fs_list(state: State<'_, AppState>, path: String) -> Result<Vec<DirEntry>, String> {
+    state.fs.list_dir(Path::new(&path)).map_err(to_err)
+}
+
+#[tauri::command]
+fn cmd_fs_read(state: State<'_, AppState>, path: String) -> Result<String, String> {
+    state.fs.read(Path::new(&path)).map_err(to_err)
+}
+
+#[tauri::command]
+fn cmd_fs_write(state: State<'_, AppState>, path: String, contents: String) -> Result<(), String> {
+    state.fs.write(Path::new(&path), &contents).map_err(to_err)
+}
+
+// ---------- Python run ----------
+
+#[derive(Debug, Serialize)]
+struct PythonRunResult {
+    id: String,
+    interpreter: PathBuf,
+}
+
+#[derive(Debug, Deserialize)]
+struct PtyRunArgs {
+    file: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    cols: Option<u16>,
+    #[serde(default)]
+    rows: Option<u16>,
+}
+
+// Run File goes through the PTY so input() / interactive REPLs work.
+// Returns the PTY session id as `id` (same shape as before) — the frontend
+// reuses this id for cmd_pty_write / cmd_pty_resize / cmd_pty_close.
+#[tauri::command]
+fn cmd_python_run(state: State<'_, AppState>, payload: PtyRunArgs) -> Result<PythonRunResult, String> {
+    let root = state.workspace.root().map_err(to_err)?;
+    let env = python_env::detect(&root).map_err(to_err)?;
+    // `-u` keeps stdout/stderr unbuffered so prompts appear immediately even
+    // inside ConPTY's chunking. Python still sees a real TTY (isatty=true).
+    let mut args = vec!["-u".to_string(), payload.file.clone()];
+    args.extend(payload.args);
+    let id = state
+        .pty
+        .open(PtySpec {
+            program: Some(env.interpreter.to_string_lossy().into_owned()),
+            args,
+            cwd: Some(root.clone()),
+            cols: payload.cols.unwrap_or(120),
+            rows: payload.rows.unwrap_or(30),
+            env: vec![],
+        })
+        .map_err(to_err)?;
+    Ok(PythonRunResult { id, interpreter: env.interpreter })
+}
+
+// Non-interactive process kill (kept for ProcessRunner-spawned jobs). For PTY
+// sessions call cmd_pty_close, which terminates the child via Drop.
+#[tauri::command]
+fn cmd_process_kill(state: State<'_, AppState>, id: String) -> Result<bool, String> {
+    if state.runner.kill(&id).unwrap_or(false) {
+        return Ok(true);
+    }
+    Ok(state.pty.close(&id))
+}
+
+// ---------- PTY input / sizing ----------
+
+#[tauri::command]
+fn cmd_pty_write(state: State<'_, AppState>, id: String, data: String) -> Result<(), String> {
+    state.pty.write(&id, data.as_bytes()).map_err(to_err)
+}
+
+#[tauri::command]
+fn cmd_pty_resize(state: State<'_, AppState>, id: String, cols: u16, rows: u16) -> Result<(), String> {
+    state.pty.resize(&id, cols, rows).map_err(to_err)
+}
+
+#[tauri::command]
+fn cmd_pty_close(state: State<'_, AppState>, id: String) -> Result<bool, String> {
+    Ok(state.pty.close(&id))
+}
+
+// ---------- Ruff ----------
+
+#[derive(Debug, Deserialize, Default)]
+struct RuffArgs {
+    #[serde(default)]
+    files: Vec<String>,
+}
+
+#[tauri::command]
+fn cmd_ruff_check(
+    state: State<'_, AppState>,
+    payload: Option<RuffArgs>,
+) -> Result<Vec<ide_core::ruff::RuffDiagnostic>, String> {
+    let root = state.workspace.root().map_err(to_err)?;
+    let payload = payload.unwrap_or_default();
+    let file_bufs: Vec<PathBuf> = payload.files.iter().map(PathBuf::from).collect();
+    let file_refs: Vec<&Path> = file_bufs.iter().map(|p| p.as_path()).collect();
+    let diags = ruff::check(&root, &file_refs).map_err(to_err)?;
+    // The bus event is a signal that ruff ran; the response body carries the
+    // actual diagnostics for the Problems panel. Live editor squiggles only
+    // come from Pyright for now.
+    state.bus.publish(CoreEvent::Diagnostics {
+        path: root.clone(),
+        source: "ruff".to_string(),
+        items: vec![],
+    });
+    Ok(diags)
+}
+
+// ---------- Document lifecycle (forwarded to Pyright) ----------
+
+#[tauri::command]
+fn cmd_doc_did_open(state: State<'_, AppState>, path: String, text: String) -> Result<(), String> {
+    // Best-effort: never error the UI just because pyright isn't running.
+    let _ = state.pyright.did_open(Path::new(&path), &text);
+    Ok(())
+}
+
+#[tauri::command]
+fn cmd_doc_did_change(state: State<'_, AppState>, path: String, text: String) -> Result<(), String> {
+    let _ = state.pyright.did_change(Path::new(&path), &text);
+    Ok(())
+}
+
+#[tauri::command]
+fn cmd_doc_did_save(
+    state: State<'_, AppState>,
+    path: String,
+    text: Option<String>,
+) -> Result<(), String> {
+    let _ = state.pyright.did_save(Path::new(&path), text.as_deref());
+    Ok(())
+}
+
+#[tauri::command]
+fn cmd_doc_did_close(state: State<'_, AppState>, path: String) -> Result<(), String> {
+    let _ = state.pyright.did_close(Path::new(&path));
+    Ok(())
+}
+
+#[allow(dead_code)]
+type _A = Arc<()>;

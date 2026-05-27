@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CustomIDE</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header id="topbar">
+        <button id="btn-open-folder">Open Folder</button>
+        <span id="workspace-label">No workspace</span>
+        <span class="spacer"></span>
+        <button id="btn-run">Run File</button>
+        <button id="btn-ruff">Run Ruff</button>
+        <button id="btn-save">Save</button>
+      </header>
+      <main id="body">
+        <aside id="sidebar">
+          <nav id="activity-rail">
+            <button class="rail-btn active" data-mode="explorer" title="Explorer">E</button>
+            <button class="rail-btn" data-mode="search" title="Search">S</button>
+            <button class="rail-btn" data-mode="run" title="Run/Test">R</button>
+          </nav>
+          <section id="sidebar-panel">
+            <div id="panel-explorer" class="sidebar-view"></div>
+            <div id="panel-search" class="sidebar-view hidden">
+              <p class="placeholder">Search — placeholder.</p>
+            </div>
+            <div id="panel-run" class="sidebar-view hidden">
+              <p class="placeholder">Run/Test — placeholder.</p>
+            </div>
+          </section>
+        </aside>
+        <section id="center">
+          <div id="tabs"></div>
+          <div id="editor"></div>
+        </section>
+      </main>
+      <footer id="bottom">
+        <nav id="bottom-tabs">
+          <button class="bottom-tab active" data-mode="terminal">Terminal</button>
+          <button class="bottom-tab" data-mode="problems">Problems</button>
+        </nav>
+        <div id="bottom-content">
+          <div id="terminal" class="bottom-view"></div>
+          <div id="problems" class="bottom-view hidden"></div>
+        </div>
+      </footer>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

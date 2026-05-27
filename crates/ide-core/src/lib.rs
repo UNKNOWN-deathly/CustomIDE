@@ -12,6 +12,7 @@ pub mod fs_service;
 pub mod lsp;
 pub mod process;
 pub mod pty;
+pub mod pyright;
 pub mod python_env;
 pub mod pytest;
 pub mod ruff;
