@@ -1,25 +1,25 @@
 /* Modern, calm, Python-first theme custom variables */
 :root {
   --bg-editor: #1e1e1e;
-  --bg-sidebar: #18191b;
-  --bg-topbar: #1f2023;
-  --bg-rail: #131416;
-  --bg-tabs: #131416;
-  --bg-bottom-tabs: #131416;
+  --bg-sidebar: #181818;
+  --bg-topbar: #181818;
+  --bg-rail: #181818;
+  --bg-tabs: #181818;
+  --bg-bottom-tabs: #181818;
   
-  --border-color: #2b2e33;
-  --border-soft: #24262a;
+  --border-color: #2b2b2b;
+  --border-soft: #242424;
   
-  --accent-color: #4b8bbe; /* Calm Python Blue */
-  --accent-hover: #5c9cd0;
-  --accent-bg: rgba(75, 139, 190, 0.15);
+  --accent-color: #007acc;
+  --accent-hover: #1f8ad6;
+  --accent-bg: rgba(0, 122, 204, 0.15);
   
-  --text-main: #e2e4e9;
-  --text-muted: #8c919d;
-  --text-dark: #585b62;
+  --text-main: #cccccc;
+  --text-muted: #969696;
+  --text-dark: #6e6e6e;
   
-  --scrollbar-thumb: #34373d;
-  --scrollbar-thumb-hover: #484c55;
+  --scrollbar-thumb: #464646;
+  --scrollbar-thumb-hover: #555555;
   
   --font-stack: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --font-mono: Consolas, Menlo, Monaco, "Courier New", monospace;
@@ -83,22 +83,21 @@ body.resizing #bottom-content {
   user-select: none;
 }
 #topbar button {
-  background: #2a2c31;
-  border: 1px solid var(--border-color);
+  background: transparent;
+  border: none;
   color: var(--text-main);
-  padding: 4px 12px;
+  padding: 4px 8px;
   font-size: 12px;
-  font-weight: 500;
+  font-weight: 400;
   border-radius: 4px;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: all 0.1s ease;
 }
 #topbar button:hover {
-  background: #33363d;
-  border-color: #434752;
+  background: rgba(255, 255, 255, 0.08);
 }
 #topbar button:active {
-  background: #202226;
+  background: rgba(255, 255, 255, 0.12);
 }
 #workspace-label {
   color: var(--text-muted);
@@ -229,24 +228,25 @@ body.resizing #bottom-content {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 10px;
-  margin: 1px 6px;
-  border-radius: 4px;
+  padding: 0 10px;
+  height: 22px;
+  margin: 0;
+  border-radius: 0;
   cursor: pointer;
   user-select: none;
   white-space: nowrap;
   color: var(--text-muted);
-  font-size: 12.5px;
-  transition: all 0.15s ease;
+  font-size: 13px;
+  transition: none;
 }
 .file-tree-node:hover {
-  background: rgba(255, 255, 255, 0.04);
+  background: #2a2d2e;
   color: var(--text-main);
 }
 .file-tree-node.selected {
-  background: var(--accent-bg);
-  color: var(--text-main);
-  font-weight: 500;
+  background: #37373d;
+  color: #ffffff;
+  font-weight: 400;
 }
 .file-tree-node .twisty {
   width: 14px;
@@ -275,6 +275,7 @@ body.resizing #bottom-content {
   background: var(--bg-tabs);
   border-bottom: 1px solid var(--border-color);
   overflow-x: auto;
+  height: 35px;
 }
 #tabs::-webkit-scrollbar {
   display: none; /* Keep tabs scroll clean */
@@ -285,25 +286,25 @@ body.resizing #bottom-content {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0 16px;
+  padding: 0 12px 0 16px;
   height: 100%;
-  border-right: 1px solid var(--border-soft);
-  border-top: 2px solid transparent;
+  border-right: none;
+  border-top: 1px solid transparent;
   cursor: pointer;
   white-space: nowrap;
   color: var(--text-muted);
   font-weight: 400;
-  transition: background-color 0.2s cubic-bezier(0.4, 0, 0.2, 1), color 0.2s cubic-bezier(0.4, 0, 0.2, 1), border-top-color 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: background-color 0.1s ease;
 }
 .tab:hover {
-  background: rgba(255, 255, 255, 0.02);
+  background: #1e1e1e;
   color: var(--text-main);
 }
 .tab.active {
   background: var(--bg-editor);
   color: var(--text-main);
-  border-top: 2px solid var(--accent-color);
-  font-weight: 500;
+  border-top: 1px solid var(--accent-color);
+  font-weight: 400;
 }
 
 .tab-label {
@@ -324,25 +325,25 @@ body.resizing #bottom-content {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 18px;
+  width: 20px;
+  height: 20px;
   line-height: 1;
   border-radius: 4px;
   color: transparent; /* Invisible by default */
-  font-size: 15px;
-  font-weight: 400;
+  font-size: 16px;
+  font-weight: 300;
   cursor: pointer;
-  transition: background-color 0.15s ease, color 0.15s ease, opacity 0.15s ease;
+  transition: none;
 }
 
 .tab:hover .close,
 .tab.active .close {
-  color: var(--text-dark);
+  color: var(--text-muted);
 }
 
 .tab .close:hover {
-  background: rgba(248, 81, 73, 0.15);
-  color: #ec5f67 !important;
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-main) !important;
 }
 
 /* Unsaved state dot */
@@ -393,16 +394,16 @@ body.resizing #bottom-content {
 }
 #editor-empty-state h1 {
   margin: 0;
-  color: var(--text-main);
-  font-size: 18px;
-  font-weight: 500;
-  letter-spacing: -0.2px;
+  color: var(--text-muted);
+  font-size: 24px;
+  font-weight: 300;
+  letter-spacing: 0;
 }
 .empty-state-subtitle {
   margin: 0 0 16px 0;
-  font-size: 12.5px;
+  font-size: 13px;
   line-height: 1.4;
-  color: var(--text-muted);
+  color: var(--text-dark);
 }
 .empty-state-shortcuts {
   width: 100%;
@@ -545,7 +546,7 @@ body.resizing #bottom-content {
   position: relative;
   background: var(--border-color);
   z-index: 100;
-  transition: background 0.15s ease;
+  transition: background 0.1s ease 0.3s;
 }
 .vertical-resizer {
   width: 1px;
@@ -577,7 +578,11 @@ body.resizing #bottom-content {
   cursor: row-resize;
   z-index: 101;
 }
-.resizer:hover, body.resizing .resizer {
+body.resizing .resizer {
+  background: var(--accent-color);
+  transition-delay: 0s;
+}
+.resizer:hover {
   background: var(--accent-color);
 }
 
@@ -598,20 +603,21 @@ body.resizing #bottom-content {
   background: transparent;
   border: none;
   color: var(--text-muted);
-  padding: 0 16px;
+  padding: 0 12px;
   height: 100%;
   cursor: pointer;
-  font-size: 12px;
-  font-weight: 500;
-  transition: all 0.15s ease;
-  border-bottom: 2px solid transparent;
+  font-size: 11px;
+  text-transform: uppercase;
+  font-weight: 400;
+  transition: none;
+  border-bottom: 1px solid transparent;
 }
 .bottom-tab:hover {
   color: var(--text-main);
 }
 .bottom-tab.active {
   color: var(--text-main);
-  border-bottom: 2px solid var(--accent-color);
+  border-bottom: 1px solid var(--accent-color);
 }
 
 #bottom-content {
