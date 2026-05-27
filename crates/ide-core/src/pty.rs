@@ -1,0 +1,167 @@
+//! PTY/terminal manager — backs the bottom-panel terminal. Each session has an
+//! id, a pseudo-tty, and a child shell. Output is streamed as base64-free raw
+//! strings via the event bus (UI can hand them straight to xterm.js).
+
+use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::thread;
+
+use parking_lot::Mutex;
+use portable_pty::{Child, CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::errors::{IdeError, IdeResult};
+use crate::events::{Event, EventBus, OutputStream};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PtySpec {
+    pub program: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub cwd: Option<PathBuf>,
+    #[serde(default = "default_cols")]
+    pub cols: u16,
+    #[serde(default = "default_rows")]
+    pub rows: u16,
+    #[serde(default)]
+    pub env: Vec<(String, String)>,
+}
+
+fn default_cols() -> u16 { 120 }
+fn default_rows() -> u16 { 30 }
+
+struct Session {
+    master: Box<dyn MasterPty + Send>,
+    writer: Box<dyn Write + Send>,
+    _child: Box<dyn Child + Send + Sync>,
+}
+
+#[derive(Clone)]
+pub struct PtyManager {
+    bus: EventBus,
+    sessions: Arc<Mutex<HashMap<String, Arc<Mutex<Session>>>>>,
+}
+
+impl PtyManager {
+    pub fn new(bus: EventBus) -> Self {
+        Self { bus, sessions: Arc::new(Mutex::new(HashMap::new())) }
+    }
+
+    pub fn open(&self, spec: PtySpec) -> IdeResult<String> {
+        let pty_system = NativePtySystem::default();
+        let pair = pty_system
+            .openpty(PtySize {
+                rows: spec.rows,
+                cols: spec.cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|e| IdeError::other(format!("pty open: {e}")))?;
+
+        let program = spec.program.unwrap_or_else(default_shell);
+        let mut cmd = CommandBuilder::new(program);
+        for a in &spec.args {
+            cmd.arg(a);
+        }
+        if let Some(cwd) = &spec.cwd {
+            cmd.cwd(cwd);
+        }
+        for (k, v) in &spec.env {
+            cmd.env(k, v);
+        }
+
+        let child = pair
+            .slave
+            .spawn_command(cmd)
+            .map_err(|e| IdeError::other(format!("pty spawn: {e}")))?;
+        drop(pair.slave);
+
+        let mut reader = pair
+            .master
+            .try_clone_reader()
+            .map_err(|e| IdeError::other(format!("pty reader: {e}")))?;
+        let writer = pair
+            .master
+            .take_writer()
+            .map_err(|e| IdeError::other(format!("pty writer: {e}")))?;
+
+        let id = Uuid::new_v4().to_string();
+        let session = Arc::new(Mutex::new(Session {
+            master: pair.master,
+            writer,
+            _child: child,
+        }));
+        self.sessions.lock().insert(id.clone(), session);
+
+        let bus = self.bus.clone();
+        let id_for_pump = id.clone();
+        thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let chunk = String::from_utf8_lossy(&buf[..n]).into_owned();
+                        bus.publish(Event::ProcessOutput {
+                            id: id_for_pump.clone(),
+                            stream: OutputStream::Stdout,
+                            line: chunk,
+                        });
+                    }
+                    Err(_) => break,
+                }
+            }
+            bus.publish(Event::ProcessExited { id: id_for_pump, code: None });
+        });
+
+        Ok(id)
+    }
+
+    pub fn write(&self, id: &str, data: &[u8]) -> IdeResult<()> {
+        let session = self
+            .sessions
+            .lock()
+            .get(id)
+            .cloned()
+            .ok_or_else(|| IdeError::other(format!("no pty session: {id}")))?;
+        let mut s = session.lock();
+        s.writer.write_all(data)?;
+        s.writer.flush()?;
+        Ok(())
+    }
+
+    pub fn resize(&self, id: &str, cols: u16, rows: u16) -> IdeResult<()> {
+        let session = self
+            .sessions
+            .lock()
+            .get(id)
+            .cloned()
+            .ok_or_else(|| IdeError::other(format!("no pty session: {id}")))?;
+        session
+            .lock()
+            .master
+            .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+            .map_err(|e| IdeError::other(format!("pty resize: {e}")))?;
+        Ok(())
+    }
+
+    pub fn close(&self, id: &str) -> bool {
+        self.sessions.lock().remove(id).is_some()
+    }
+
+    pub fn list(&self) -> Vec<String> {
+        self.sessions.lock().keys().cloned().collect()
+    }
+}
+
+fn default_shell() -> String {
+    if cfg!(windows) {
+        std::env::var("COMSPEC").unwrap_or_else(|_| "powershell.exe".to_string())
+    } else {
+        std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
+    }
+}
