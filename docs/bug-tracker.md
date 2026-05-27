@@ -47,6 +47,22 @@
   - **Evidence**: `npm run build` and `cargo check` pass after replacing the startup quick-action path with temporary-first creation.
   - **Status**: Fixed (unverified)
 
+- [ ] **BUG-7: Explorer actions lack complete temporary and filesystem item operations** - `Medium`
+  - **File**: `ui/src/explorer.ts`, `ui/src/main.ts`, `ui/src/ipc.ts`, `crates/ide-shell/src/main.rs`
+  - **Issue**: Sidebar New File/New Folder did nothing without an active workspace, temporary nested folder creation was fragile, and explorer context menus lacked Rename/Delete.
+  - **Probable cause**: Sidebar buttons only called `explorer.beginCreate()` when an existing workspace object was present; scratch tree mutation stayed local to create-only paths; backend rename/remove existed in `FsService` but had no Tauri command wiring.
+  - **Fix**: Route sidebar buttons through shared temp/scratch helpers, preserve scratch selection while nesting, add Rename/Delete context actions, wire `cmd_fs_rename` / `cmd_fs_remove`, and synchronize open tabs on rename/delete.
+  - **Evidence**: `npm run build` and `cargo check` pass after adding explorer rename/delete and scratch nesting refinements.
+  - **Status**: Fixed (unverified)
+
+- [ ] **BUG-8: Explorer folder collapse leaves stale active creation context** - `Medium`
+  - **File**: `ui/src/explorer.ts`
+  - **Issue**: Newly created temporary folders auto-expanded and then became the active creation parent, so later toolbar New File/New Folder actions stayed pinned inside that first folder.
+  - **Probable cause**: Scratch folder creation both expanded the new folder and assigned `scratchSelectedDir = entry.path`; additionally, the scratch root render path was hard-coded as expanded, always rendered children, and had no root caret toggle handler.
+  - **Fix**: Keep auto-expanded folders visually open while leaving `scratchSelectedDir` on the parent/root, separate caret toggle clicks from folder-row selection, make the scratch root reconcile against `scratchExpanded`, and add gated explorer-tree traces for collapse verification.
+  - **Evidence**: `npm run build`, `cargo check`, and `cargo build -p ide-shell` pass after the focused collapse/context-state fix.
+  - **Status**: Fixed (unverified)
+
 ## Needs Confirmation
 
 ## Resolved Issues

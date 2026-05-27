@@ -176,9 +176,24 @@ async function bootstrap() {
     return file === root || file.startsWith(`${root}/`);
   }
 
+  function pathIsDescendant(path: string, parent: string) {
+    const root = normPath(parent).replace(/\/+$/, "");
+    const file = normPath(path);
+    return file === root || file.startsWith(`${root}/`);
+  }
+
   function joinPath(parent: string, name: string) {
     const sep = parent.includes("\\") && !parent.includes("/") ? "\\" : "/";
     return `${parent.replace(/[\\/]+$/, "")}${sep}${name}`;
+  }
+
+  function basename(path: string) {
+    return path.split(/[\\/]/).pop() ?? path;
+  }
+
+  function replacePathPrefix(path: string, oldPrefix: string, newPrefix: string) {
+    const suffix = path.slice(oldPrefix.length).replace(/^[\\/]+/, "");
+    return suffix ? joinPath(newPrefix, suffix) : newPrefix;
   }
 
   function scratchWorkspaceRoot(): ScratchFolder | null {
@@ -189,6 +204,12 @@ async function bootstrap() {
       path: scratchWorkspace.rootPath,
       children: scratchWorkspace.children,
     };
+  }
+
+  function updateScratchWorkspaceName(name: string) {
+    if (!scratchWorkspace) return;
+    scratchWorkspace.name = name;
+    updateWorkspaceUi(null);
   }
 
   function scratchChildExists(parent: ScratchFolder, name: string) {
@@ -225,6 +246,52 @@ async function bootstrap() {
     if (file) {
       file.content = editor.getDoc();
     }
+  }
+
+  function closeTabsForDeletedPath(path: string, isDir: boolean) {
+    const affected = tabs
+      .all()
+      .filter((tab) => isDir ? pathIsDescendant(tab.path, path) : normPath(tab.path) === normPath(path));
+    for (const tab of affected) {
+      tabs.close(tab.path);
+    }
+    if (isDir) {
+      for (const key of Array.from(diagnostics.keys())) {
+        if (pathIsDescendant(key, path)) diagnostics.delete(key);
+      }
+    } else {
+      diagnostics.delete(normPath(path));
+    }
+    refreshProblems();
+  }
+
+  function renameTabsForPath(from: string, to: string, isDir: boolean) {
+    const affected = tabs
+      .all()
+      .filter((tab) => isDir ? pathIsDescendant(tab.path, from) : normPath(tab.path) === normPath(from));
+    for (const tab of affected) {
+      const oldPath = tab.path;
+      const nextPath = isDir ? replacePathPrefix(tab.path, from, to) : to;
+      const diagnostic = diagnostics.get(normPath(oldPath));
+      tabs.renamePath(oldPath, nextPath, basename(nextPath));
+      if (diagnostic) {
+        diagnostics.delete(normPath(oldPath));
+        diagnostics.set(normPath(nextPath), { ...diagnostic, path: nextPath });
+      }
+    }
+    refreshProblems();
+    persistWorkspaceTabState().catch(() => {});
+  }
+
+  function discardScratchWorkspace() {
+    scratchWorkspace = null;
+    explorer.clearScratchRoot();
+    for (const tab of tabs.all()) {
+      if (isTemporaryPath(tab.path)) tabs.close(tab.path);
+    }
+    updateWorkspaceUi(null);
+    showEditor(false);
+    renderEmptyState();
   }
 
   function syncScratchTabs() {
@@ -431,9 +498,11 @@ async function bootstrap() {
 
   async function createFolderFromEmptyState() {
     const name = await promptName({
-      title: "New Folder",
-      label: "Folder name",
-      initialValue: "New Folder",
+      title: "Name your scratch workspace",
+      description: "This creates a temporary workspace root for your unsaved files and folders. The root exists only while working in scratch mode and helps organize temporary project structure before saving to disk.",
+      label: "Workspace name",
+      initialValue: "Scratch Workspace",
+      confirmLabel: "Start Workspace",
     });
     if (!name) return;
 
@@ -861,6 +930,39 @@ async function bootstrap() {
     }
     tabs.open(path).catch((e) => terminal.log(`open failed: ${String(e)}`));
   });
+  explorer.onRename((from, to, isDir) => {
+    renameTabsForPath(from, to, isDir);
+  });
+  explorer.onDelete((path, isDir) => {
+    closeTabsForDeletedPath(path, isDir);
+  });
+  explorer.onConfirmDelete(async (path, isDir) => {
+    const temporary = isTemporaryPath(path);
+    const decision = await confirmSave({
+      title: `Delete ${basename(path)}?`,
+      message: temporary
+        ? "This temporary item exists only in memory and will be discarded."
+        : isDir
+          ? "This will permanently delete the folder and its contents."
+          : "This will permanently delete the file.",
+      saveLabel: "Delete",
+      discardLabel: "Don't Delete",
+    });
+    return decision === "save";
+  });
+  explorer.onScratchRootRename((name) => {
+    updateScratchWorkspaceName(name);
+  });
+  explorer.onScratchRootDelete(() => {
+    confirmSave({
+      title: `Delete ${scratchWorkspace?.name ?? "scratch workspace"}?`,
+      message: "This scratch workspace exists only in memory. Delete it and close any temporary files?",
+      saveLabel: "Delete",
+      discardLabel: "Don't Delete",
+    }).then((decision) => {
+      if (decision === "save") discardScratchWorkspace();
+    });
+  });
 
   tabs.onCloseRequest((path) => {
     closeTabWithConfirm(path).catch(() => {});
@@ -869,15 +971,21 @@ async function bootstrap() {
   const btnNewFile = document.getElementById("btn-new-file");
   if (btnNewFile) {
     btnNewFile.onclick = () => {
-      if (!currentWorkspace && !scratchWorkspace) return;
-      explorer.beginCreate("file").catch(() => {});
+      if (currentWorkspace || scratchWorkspace) {
+        explorer.beginCreate("file").catch(() => {});
+        return;
+      }
+      createFileFromEmptyState().catch((e) => terminal.log(`new file failed: ${String(e)}`));
     };
   }
   const btnNewFolder = document.getElementById("btn-new-folder");
   if (btnNewFolder) {
     btnNewFolder.onclick = () => {
-      if (!currentWorkspace && !scratchWorkspace) return;
-      explorer.beginCreate("folder").catch(() => {});
+      if (currentWorkspace || scratchWorkspace) {
+        explorer.beginCreate("folder").catch(() => {});
+        return;
+      }
+      createFolderFromEmptyState().catch((e) => terminal.log(`new folder failed: ${String(e)}`));
     };
   }
 
@@ -906,6 +1014,10 @@ async function bootstrap() {
   const btnEmptyNewFile = $("btn-empty-new-file");
   if (btnEmptyNewFile) {
     btnEmptyNewFile.onclick = () => {
+      if (currentWorkspace || scratchWorkspace) {
+        explorer.beginCreate("file").catch(() => {});
+        return;
+      }
       createFileFromEmptyState().catch((e) => terminal.log(`new file failed: ${String(e)}`));
     };
   }
@@ -913,6 +1025,10 @@ async function bootstrap() {
   const btnEmptyNewFolder = $("btn-empty-new-folder");
   if (btnEmptyNewFolder) {
     btnEmptyNewFolder.onclick = () => {
+      if (currentWorkspace || scratchWorkspace) {
+        explorer.beginCreate("folder").catch(() => {});
+        return;
+      }
       createFolderFromEmptyState().catch((e) => terminal.log(`new folder failed: ${String(e)}`));
     };
   }

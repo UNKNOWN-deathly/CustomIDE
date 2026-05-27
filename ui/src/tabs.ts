@@ -17,6 +17,7 @@ export interface TabsBinding {
   openTemporaryFile(name: string, content?: string): string;
   openVirtualFile(path: string, name: string, content?: string): void;
   close(path: string): void;
+  renamePath(oldPath: string, newPath: string, newName?: string): void;
   active(): Tab | null;
   setActive(path: string): void;
   updateActiveContent(content: string): void;
@@ -164,6 +165,17 @@ export function mountTabs(host: HTMLElement): TabsBinding {
         listener?.(next ? tabs.get(next)! : null);
       }
       render();
+    },
+    renamePath(oldPath: string, newPath: string, newName?: string) {
+      const tab = tabs.get(oldPath);
+      if (!tab) return;
+      tabs.delete(oldPath);
+      tab.path = newPath;
+      tab.name = newName ?? newPath.split(/[\\/]/).pop() ?? newPath;
+      tabs.set(newPath, tab);
+      if (activePath === oldPath) activePath = newPath;
+      render();
+      if (activePath === newPath) listener?.(tab);
     },
     active() {
       return activePath ? tabs.get(activePath) ?? null : null;

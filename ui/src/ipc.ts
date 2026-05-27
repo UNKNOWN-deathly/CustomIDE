@@ -103,6 +103,9 @@ export const ipc = {
     invoke<void>("cmd_fs_write", { path, contents }),
   fsCreateFile: (path: string) => invoke<void>("cmd_fs_create_file", { path }),
   fsCreateDir: (path: string) => invoke<void>("cmd_fs_create_dir", { path }),
+  fsRename: (from: string, to: string) =>
+    invoke<void>("cmd_fs_rename", { from, to }),
+  fsRemove: (path: string) => invoke<void>("cmd_fs_remove", { path }),
   pythonRun: (
     file: string,
     args: string[] = [],

@@ -255,7 +255,7 @@ body.resizing #bottom-content {
 .sidebar-header .actions {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
 }
 .sidebar-header-btn {
   background: transparent;
@@ -267,13 +267,17 @@ body.resizing #bottom-content {
   align-items: center;
   justify-content: center;
   border-radius: 4px;
-  width: 20px;
-  height: 20px;
+  width: 26px;
+  height: 24px;
   transition: all 0.12s ease;
+}
+.sidebar-header-btn svg {
+  width: 16px;
+  height: 16px;
 }
 .sidebar-header-btn:hover {
   color: var(--text-main);
-  background: rgba(255, 255, 255, 0.05);
+  background: rgba(255, 255, 255, 0.07);
 }
 
 .placeholder {
@@ -306,9 +310,26 @@ body.resizing #bottom-content {
   background: rgba(255, 255, 255, 0.07);
   color: #ffffff;
 }
+.file-tree-node.workspace-root-node {
+  text-transform: uppercase;
+  font-weight: 600;
+  font-size: 11px;
+  letter-spacing: 0.8px;
+  color: var(--text-muted);
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+.file-tree-node.workspace-root-node:hover {
+  background: transparent;
+  color: var(--text-main);
+}
+.file-tree-node.workspace-root-node.selected {
+  background: transparent;
+  color: #ffffff;
+}
 .file-tree-node .twisty {
-  width: 16px;
-  height: 16px;
+  width: 18px;
+  height: 22px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -316,11 +337,15 @@ body.resizing #bottom-content {
   transition: transform 0.12s cubic-bezier(0.4, 0, 0.2, 1);
   flex-shrink: 0;
 }
+.file-tree-node .folder-twisty {
+  cursor: pointer;
+}
 .file-tree-node.expanded .twisty svg {
   transform: rotate(90deg);
 }
 .file-tree-node .twisty svg {
   transition: transform 0.12s ease;
+  pointer-events: none;
 }
 .file-tree-node .tree-icon {
   width: 16px;

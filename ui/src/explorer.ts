@@ -28,8 +28,13 @@ export interface ExplorerBinding {
   onOpenFile(handler: (path: string) => void): void;
   /** Called after the user creates a file via the in-tree input. */
   onFileCreated(handler: (path: string) => void): void;
+  onRename(handler: (from: string, to: string, isDir: boolean) => void): void;
+  onDelete(handler: (path: string, isDir: boolean) => void): void;
+  onConfirmDelete(handler: (path: string, isDir: boolean) => Promise<boolean>): void;
+  onScratchRootRename(handler: (name: string) => void): void;
+  onScratchRootDelete(handler: () => void): void;
   /** Begin an inline create at the current target dir (workspace root if none selected). */
-  beginCreate(kind: CreateKind): Promise<void>;
+  beginCreate(kind: CreateKind, explicitTargetDir?: string): Promise<void>;
   applyEvent(evt: CoreEvent): void;
 }
 
@@ -88,15 +93,27 @@ function joinPath(parent: string, name: string): string {
   return `${trimmed}${sep}${name}`;
 }
 
+function debugExplorerTree(message: string, details?: Record<string, unknown>) {
+  if (localStorage.getItem("customide.debug.explorerTree") !== "1") return;
+  console.debug(`[explorer-tree] ${message}`, details ?? {});
+}
+
 export function mountExplorer(host: HTMLElement): ExplorerBinding {
   let openHandler: ((p: string) => void) | null = null;
   let fileCreatedHandler: ((p: string) => void) | null = null;
+  let renameHandler: ((from: string, to: string, isDir: boolean) => void) | null = null;
+  let deleteHandler: ((path: string, isDir: boolean) => void) | null = null;
+  let confirmDeleteHandler: ((path: string, isDir: boolean) => Promise<boolean>) | null = null;
+  let scratchRootRenameHandler: ((name: string) => void) | null = null;
+  let scratchRootDeleteHandler: (() => void) | null = null;
   let rootPath: string | null = null;
   let selectedDir: string | null = null;
+  let selectedPath: string | null = null;
   const byPath = new Map<string, NodeState>();
   let pendingInput: HTMLElement | null = null;
   let scratchRoot: ScratchFolder | null = null;
   let scratchSelectedDir: string | null = null;
+  let scratchSelectedPath: string | null = null;
   const scratchExpanded = new Set<string>();
   const scratchContainers = new Map<string, HTMLElement>();
   const scratchDepths = new Map<string, number>();
@@ -105,13 +122,18 @@ export function mountExplorer(host: HTMLElement): ExplorerBinding {
   async function setRoot(root: string) {
     scratchRoot = null;
     scratchSelectedDir = null;
+    scratchSelectedPath = null;
     scratchExpanded.clear();
     scratchContainers.clear();
     scratchDepths.clear();
     rootPath = root;
     selectedDir = null;
+    selectedPath = null;
     const currentId = ++setRootCallId;
-    const entries = await ipc.fsList(root);
+    async function getEntries() {
+      return await ipc.fsList(root);
+    }
+    const entries = await getEntries();
     if (currentId === setRootCallId) {
       host.innerHTML = "";
       byPath.clear();
@@ -125,10 +147,12 @@ export function mountExplorer(host: HTMLElement): ExplorerBinding {
   function setScratchRoot(rootName: string, scratchPath: string, children: ScratchEntry[]) {
     rootPath = null;
     selectedDir = null;
+    selectedPath = null;
     byPath.clear();
     pendingInput = null;
     scratchRoot = { kind: "folder", name: rootName, path: scratchPath, children };
     scratchSelectedDir = scratchPath;
+    scratchSelectedPath = scratchPath;
     scratchExpanded.clear();
     scratchExpanded.add(scratchPath);
     renderScratchRoot();
@@ -137,6 +161,7 @@ export function mountExplorer(host: HTMLElement): ExplorerBinding {
   function clearScratchRoot() {
     scratchRoot = null;
     scratchSelectedDir = null;
+    scratchSelectedPath = null;
     scratchExpanded.clear();
     scratchContainers.clear();
     scratchDepths.clear();
@@ -149,8 +174,14 @@ export function mountExplorer(host: HTMLElement): ExplorerBinding {
     el.style.paddingLeft = `${6 + depth * 10}px`;
 
     const twisty = document.createElement("span");
-    twisty.className = "twisty";
+    twisty.className = entry.is_dir ? "twisty folder-twisty" : "twisty";
     twisty.innerHTML = entry.is_dir ? chevronRightSvg : "";
+    if (entry.is_dir) {
+      twisty.onclick = async (e) => {
+        e.stopPropagation();
+        await toggleExpand(state);
+      };
+    }
     el.appendChild(twisty);
 
     const icon = document.createElement("span");
@@ -171,9 +202,9 @@ export function mountExplorer(host: HTMLElement): ExplorerBinding {
         .querySelectorAll(".file-tree-node.selected")
         .forEach((n) => n.classList.remove("selected"));
       el.classList.add("selected");
+      selectedPath = entry.path;
       if (entry.is_dir) {
         selectedDir = entry.path;
-        await toggleExpand(state);
       } else {
         // Selected file → context for new-file lives in its parent dir.
         selectedDir = parentOf(entry.path);
@@ -187,8 +218,16 @@ export function mountExplorer(host: HTMLElement): ExplorerBinding {
         .querySelectorAll(".file-tree-node.selected")
         .forEach((n) => n.classList.remove("selected"));
       el.classList.add("selected");
+      selectedPath = entry.path;
       selectedDir = entry.is_dir ? entry.path : parentOf(entry.path);
-      showContextMenu(e.clientX, e.clientY, entry);
+      showContextMenu(e.clientX, e.clientY, {
+        path: entry.path,
+        name: entry.name,
+        isDir: entry.is_dir,
+        isScratch: false,
+        isRoot: false,
+        row: el,
+      });
     };
 
     const wrap = document.createElement("div");
@@ -203,11 +242,30 @@ export function mountExplorer(host: HTMLElement): ExplorerBinding {
   }
 
   async function toggleExpand(state: NodeState) {
+    debugExplorerTree("filesystem caret toggle", {
+      path: state.entry.path,
+      wasExpanded: state.expanded,
+      selected: selectedDir,
+    });
     if (state.expanded) {
       if (state.childrenWrap) state.childrenWrap.remove();
       state.childrenWrap = null;
       state.expanded = false;
       state.el.classList.remove("expanded");
+      for (const path of [...byPath.keys()]) {
+        if (isDescendant(path, state.entry.path)) byPath.delete(path);
+      }
+      if (selectedPath && isSameOrDescendant(selectedPath, state.entry.path)) {
+        // If a descendant was selected, move selection to this folder.
+        // If this folder itself was selected, keep it selected.
+        selectedPath = state.entry.path;
+        selectedDir = parentOf(state.entry.path);
+        syncFilesystemSelection();
+      }
+      debugExplorerTree("filesystem folder collapsed", {
+        path: state.entry.path,
+        selectedAfter: selectedDir,
+      });
       const iconSpan = state.el.querySelector(".tree-icon");
       if (iconSpan) iconSpan.innerHTML = folderClosedSvg;
       return;
@@ -229,6 +287,10 @@ export function mountExplorer(host: HTMLElement): ExplorerBinding {
     state.el.classList.add("expanded");
     const iconSpan = state.el.querySelector(".tree-icon");
     if (iconSpan) iconSpan.innerHTML = folderOpenSvg;
+    debugExplorerTree("filesystem folder expanded", {
+      path: state.entry.path,
+      selected: selectedDir,
+    });
   }
 
   async function refreshLevel(dir: string) {
@@ -249,6 +311,7 @@ export function mountExplorer(host: HTMLElement): ExplorerBinding {
         const s = byPath.get(p);
         if (s) await expand(s);
       }
+      syncFilesystemSelection();
       return;
     }
     const state = findStateByPath(dir);
@@ -278,6 +341,7 @@ export function mountExplorer(host: HTMLElement): ExplorerBinding {
       const s = byPath.get(p);
       if (s) await expand(s);
     }
+    syncFilesystemSelection();
   }
 
   function findStateByPath(p: string): NodeState | undefined {
@@ -299,16 +363,63 @@ export function mountExplorer(host: HTMLElement): ExplorerBinding {
     return c.startsWith(`${p}/`);
   }
 
+  function isSameOrDescendant(child: string, parent: string): boolean {
+    return samePath(child, parent) || isDescendant(child, parent);
+  }
+
+  function clearSelectedRows() {
+    host
+      .querySelectorAll(".file-tree-node.selected")
+      .forEach((n) => n.classList.remove("selected"));
+  }
+
+  function syncFilesystemSelection() {
+    clearSelectedRows();
+    const activeSelection = selectedPath ?? selectedDir;
+    if (!activeSelection || (rootPath && samePath(activeSelection, rootPath))) {
+      selectedDir = null;
+      selectedPath = null;
+      return;
+    }
+    const state = findStateByPath(activeSelection);
+    if (!state) {
+      selectedDir = null;
+      selectedPath = null;
+      return;
+    }
+    state.el.classList.add("selected");
+  }
+
   // ── Inline create input ────────────────────────────────────────────────────
-  async function beginCreate(kind: CreateKind) {
+  async function beginCreate(kind: CreateKind, explicitTargetDir?: string) {
     if (scratchRoot) {
-      beginScratchCreate(kind);
+      beginScratchCreate(kind, explicitTargetDir);
       return;
     }
     if (!rootPath) return;
     cancelPendingInput();
 
-    const targetDir = selectedDir && byPath.has(selectedDir) ? selectedDir : rootPath;
+    let targetDir = explicitTargetDir;
+    if (!targetDir && selectedPath) {
+      const state = findStateByPath(selectedPath);
+      if (state) {
+        if (state.entry.is_dir) {
+          // Only use a selected folder as implicit target if it's expanded.
+          // Collapsed folders should not capture toolbar creation actions;
+          // fall back to the folder's parent instead of workspace root.
+          if (state.expanded) {
+            targetDir = state.entry.path;
+          } else {
+            targetDir = parentOf(state.entry.path);
+          }
+        } else {
+          targetDir = parentOf(state.entry.path);
+        }
+      }
+    }
+    if (!targetDir) {
+      targetDir = rootPath;
+    }
     let container: HTMLElement;
     let depth: number;
 
@@ -333,6 +444,8 @@ export function mountExplorer(host: HTMLElement): ExplorerBinding {
         } else {
           await ipc.fsCreateDir(full);
         }
+        selectedPath = full;
+        selectedDir = kind === "folder" ? full : targetDir;
         await refreshLevel(targetDir);
         if (kind === "file") {
           fileCreatedHandler?.(full);
@@ -344,6 +457,7 @@ export function mountExplorer(host: HTMLElement): ExplorerBinding {
         setTimeout(() => row.classList.remove("create-error"), 600);
         const input = row.querySelector("input");
         input?.focus();
+        throw e;
       }
     });
 
@@ -391,9 +505,12 @@ export function mountExplorer(host: HTMLElement): ExplorerBinding {
       }
       try {
         await onSubmit(value);
-      } finally {
         if (pendingInput === wrap) pendingInput = null;
         wrap.remove();
+      } catch {
+        submitted = false;
+        input.focus();
+        input.select();
       }
     };
 
@@ -426,7 +543,16 @@ export function mountExplorer(host: HTMLElement): ExplorerBinding {
 
   // ── Context menu ──────────────────────────────────────────────────────────
   let activeMenu: HTMLElement | null = null;
-  function showContextMenu(x: number, y: number, _entry: DirEntry) {
+  interface ContextTarget {
+    path: string;
+    name: string;
+    isDir: boolean;
+    isScratch: boolean;
+    isRoot: boolean;
+    row: HTMLElement;
+  }
+
+  function showContextMenu(x: number, y: number, target: ContextTarget) {
     closeContextMenu();
     const menu = document.createElement("div");
     menu.className = "explorer-context-menu";
@@ -443,8 +569,17 @@ export function mountExplorer(host: HTMLElement): ExplorerBinding {
       };
       return it;
     };
-    menu.appendChild(mkItem("New File", () => beginCreate("file")));
-    menu.appendChild(mkItem("New Folder", () => beginCreate("folder")));
+    const contextDir = target.isDir
+      ? target.path
+      : target.isScratch
+        ? scratchParentOf(target.path)
+        : parentOf(target.path);
+    menu.appendChild(mkItem("New File", () => beginCreate("file", contextDir)));
+    menu.appendChild(mkItem("New Folder", () => beginCreate("folder", contextDir)));
+    menu.appendChild(mkItem("Rename", () => beginRename(target)));
+    menu.appendChild(mkItem("Delete", () => {
+      deleteTarget(target).catch(() => {});
+    }));
     document.body.appendChild(menu);
     activeMenu = menu;
 
@@ -456,24 +591,26 @@ export function mountExplorer(host: HTMLElement): ExplorerBinding {
 
   function renderScratchRoot() {
     if (!scratchRoot) return;
+    debugExplorerTree("render scratch root", {
+      selected: scratchSelectedPath ?? scratchSelectedDir,
+      expanded: [...scratchExpanded],
+    });
     host.innerHTML = "";
     scratchContainers.clear();
     scratchDepths.clear();
 
     const rootWrap = document.createElement("div");
     const rootRow = document.createElement("div");
-    rootRow.className = "file-tree-node expanded";
-    rootRow.style.paddingLeft = "6px";
+    
+    // Force workspace root to always be expanded internally
+    if (!scratchExpanded.has(scratchRoot.path)) {
+      scratchExpanded.add(scratchRoot.path);
+    }
 
-    const twisty = document.createElement("span");
-    twisty.className = "twisty";
-    twisty.innerHTML = chevronRightSvg;
-    rootRow.appendChild(twisty);
-
-    const icon = document.createElement("span");
-    icon.className = "tree-icon";
-    icon.innerHTML = folderOpenSvg;
-    rootRow.appendChild(icon);
+    rootRow.className =
+      "file-tree-node workspace-root-node" +
+      (samePath(scratchSelectedPath ?? scratchSelectedDir ?? "", scratchRoot.path) ? " selected" : "");
+    rootRow.style.paddingLeft = "24px"; // align nicely with twisties of children
 
     const name = document.createElement("span");
     name.className = "name";
@@ -486,14 +623,21 @@ export function mountExplorer(host: HTMLElement): ExplorerBinding {
     rootRow.oncontextmenu = (e) => {
       e.preventDefault();
       selectScratchRow(rootRow, scratchRoot!.path);
-      showContextMenu(e.clientX, e.clientY, {} as DirEntry);
+      showContextMenu(e.clientX, e.clientY, {
+        path: scratchRoot!.path,
+        name: scratchRoot!.name,
+        isDir: true,
+        isScratch: true,
+        isRoot: true,
+        row: rootRow,
+      });
     };
     rootWrap.appendChild(rootRow);
 
+    scratchDepths.set(scratchRoot.path, 0);
     const childWrap = document.createElement("div");
     childWrap.className = "tree-children";
     scratchContainers.set(scratchRoot.path, childWrap);
-    scratchDepths.set(scratchRoot.path, 0);
     for (const child of scratchRoot.children) {
       childWrap.appendChild(buildScratchNode(child, 1));
     }
@@ -506,12 +650,38 @@ export function mountExplorer(host: HTMLElement): ExplorerBinding {
     const el = document.createElement("div");
     const isDir = entry.kind === "folder";
     const expanded = isDir && scratchExpanded.has(entry.path);
-    el.className = "file-tree-node" + (expanded ? " expanded" : "");
+    const isSelected = samePath(scratchSelectedPath ?? scratchSelectedDir ?? "", entry.path);
+    el.className =
+      "file-tree-node" +
+      (expanded ? " expanded" : "") +
+      (isSelected ? " selected" : "");
     el.style.paddingLeft = `${6 + depth * 10}px`;
 
     const twisty = document.createElement("span");
-    twisty.className = "twisty";
+    twisty.className = isDir ? "twisty folder-twisty" : "twisty";
     twisty.innerHTML = isDir ? chevronRightSvg : "";
+    if (isDir) {
+      twisty.onclick = (e) => {
+        e.stopPropagation();
+        debugExplorerTree("scratch caret click", {
+          path: entry.path,
+          wasExpanded: scratchExpanded.has(entry.path),
+          selected: scratchSelectedPath ?? scratchSelectedDir,
+          expanded: [...scratchExpanded],
+        });
+        if (scratchExpanded.has(entry.path)) {
+          collapseScratchFolder(entry.path);
+        } else {
+          scratchExpanded.add(entry.path);
+          debugExplorerTree("scratch folder expanded", {
+            path: entry.path,
+            selected: scratchSelectedPath ?? scratchSelectedDir,
+            expanded: [...scratchExpanded],
+          });
+          renderScratchRoot();
+        }
+      };
+    }
     el.appendChild(twisty);
 
     const icon = document.createElement("span");
@@ -525,19 +695,22 @@ export function mountExplorer(host: HTMLElement): ExplorerBinding {
     el.appendChild(name);
 
     el.onclick = () => {
-      selectScratchRow(el, isDir ? entry.path : scratchParentOf(entry.path));
-      if (entry.kind === "folder") {
-        if (scratchExpanded.has(entry.path)) scratchExpanded.delete(entry.path);
-        else scratchExpanded.add(entry.path);
-        renderScratchRoot();
-      } else {
+      selectScratchRow(el, entry.path);
+      if (entry.kind !== "folder") {
         openHandler?.(entry.path);
       }
     };
     el.oncontextmenu = (e) => {
       e.preventDefault();
-      selectScratchRow(el, isDir ? entry.path : scratchParentOf(entry.path));
-      showContextMenu(e.clientX, e.clientY, {} as DirEntry);
+      selectScratchRow(el, entry.path);
+      showContextMenu(e.clientX, e.clientY, {
+        path: entry.path,
+        name: entry.name,
+        isDir,
+        isScratch: true,
+        isRoot: false,
+        row: el,
+      });
     };
 
     wrap.appendChild(el);
@@ -554,20 +727,78 @@ export function mountExplorer(host: HTMLElement): ExplorerBinding {
     return wrap;
   }
 
-  function selectScratchRow(row: HTMLElement, dir: string) {
+  function selectScratchRow(row: HTMLElement, path: string) {
     document
       .querySelectorAll(".file-tree-node.selected")
       .forEach((n) => n.classList.remove("selected"));
     row.classList.add("selected");
-    scratchSelectedDir = dir;
+    scratchSelectedPath = path;
+    const entry = findScratchEntry(path);
+    if (entry && entry.kind === "folder") {
+      scratchSelectedDir = entry.path;
+    } else {
+      scratchSelectedDir = scratchParentOf(path);
+    }
   }
 
-  function beginScratchCreate(kind: CreateKind) {
+  function beginScratchCreate(kind: CreateKind, explicitTargetDir?: string) {
     if (!scratchRoot) return;
+    
+    console.log(`\n--- [RUNTIME_DEBUG] beginScratchCreate ---`);
+    console.log(`[RUNTIME_DEBUG] full scratch tree:`, JSON.stringify(scratchRoot, null, 2));
+    console.log(`[RUNTIME_DEBUG] requested kind: ${kind}`);
+    console.log(`[RUNTIME_DEBUG] explicitTargetDir: ${explicitTargetDir}`);
+    console.log(`[RUNTIME_DEBUG] scratchSelectedPath: ${scratchSelectedPath}`);
+    console.log(`[RUNTIME_DEBUG] scratchSelectedDir: ${scratchSelectedDir}`);
+    console.log(`[RUNTIME_DEBUG] scratchRoot.path: ${scratchRoot.path}`);
+
     cancelPendingInput();
-    const targetDir = scratchSelectedDir && findScratchFolder(scratchSelectedDir)
-      ? scratchSelectedDir
-      : scratchRoot.path;
+
+    let targetDir = explicitTargetDir;
+    let targetSource = "explicit";
+
+    if (!targetDir && scratchSelectedPath) {
+      const entry = findScratchEntry(scratchSelectedPath);
+      if (entry) {
+        console.log(`[RUNTIME_DEBUG] resolved entry.path: ${entry.path}`);
+        console.log(`[RUNTIME_DEBUG] entry.kind === "folder": ${entry.kind === "folder"}`);
+        console.log(`[RUNTIME_DEBUG] scratchExpanded.has(entry.path): ${scratchExpanded.has(entry.path)}`);
+        
+        if (entry.kind === "folder") {
+          // Only use a selected folder as implicit target if it's expanded.
+          // Collapsed folders should not capture toolbar creation actions;
+          // fall back to the folder's parent instead of scratch root.
+          if (scratchExpanded.has(entry.path)) {
+            targetDir = entry.path;
+            targetSource = "selected folder (expanded)";
+          } else {
+            targetDir = scratchParentOf(entry.path);
+            targetSource = "selected folder (collapsed, fallback to parent)";
+          }
+        } else {
+          targetDir = scratchParentOf(entry.path);
+          targetSource = "selected file (fallback to parent)";
+        }
+      } else {
+        console.log(`[RUNTIME_DEBUG] findScratchEntry returned null for ${scratchSelectedPath}`);
+      }
+    }
+    if (!targetDir) {
+      targetDir = scratchRoot.path;
+      targetSource = "root fallback";
+    }
+
+    console.log(`[RUNTIME_DEBUG] final targetDir: ${targetDir}`);
+    console.log(`[RUNTIME_DEBUG] targetSource: ${targetSource}`);
+    console.log(`------------------------------------------\n`);
+
+    debugExplorerTree("begin scratch create", {
+      kind,
+      explicitTargetDir,
+      selected: scratchSelectedPath,
+      targetDir,
+      expanded: [...scratchExpanded],
+    });
     if (!scratchExpanded.has(targetDir)) {
       scratchExpanded.add(targetDir);
       renderScratchRoot();
@@ -586,12 +817,26 @@ export function mountExplorer(host: HTMLElement): ExplorerBinding {
         row.classList.add("create-error");
         row.title = `${trimmed} already exists`;
         setTimeout(() => row.classList.remove("create-error"), 600);
-        return;
+        const input = row.querySelector("input");
+        input?.focus();
+        throw new Error(`${trimmed} already exists`);
       }
       const entry: ScratchEntry = kind === "file"
         ? { kind: "file", name: trimmed, path: full, content: "" }
         : { kind: "folder", name: trimmed, path: full, children: [] };
       parent.children.unshift(entry);
+      if (entry.kind === "folder") {
+        scratchExpanded.add(entry.path);
+      }
+      scratchSelectedPath = entry.path;
+      scratchSelectedDir = entry.kind === "folder" ? entry.path : targetDir;
+      debugExplorerTree("scratch create committed", {
+        kind,
+        targetDir,
+        createdPath: entry.path,
+        selected: scratchSelectedPath,
+        expanded: [...scratchExpanded],
+      });
       renderScratchRoot();
       if (entry.kind === "file") {
         fileCreatedHandler?.(entry.path);
@@ -602,6 +847,177 @@ export function mountExplorer(host: HTMLElement): ExplorerBinding {
     pendingInput = row;
     const input = row.querySelector("input")!;
     input.focus();
+  }
+
+  function collapseScratchFolder(path: string) {
+    console.log(`\n--- [RUNTIME_DEBUG] collapseScratchFolder ---`);
+    console.log(`[RUNTIME_DEBUG] collapsed path: ${path}`);
+    console.log(`[RUNTIME_DEBUG] scratchExpanded before:`, [...scratchExpanded]);
+    console.log(`[RUNTIME_DEBUG] scratchSelectedPath before: ${scratchSelectedPath}`);
+    console.log(`[RUNTIME_DEBUG] scratchSelectedDir before: ${scratchSelectedDir}`);
+
+    debugExplorerTree("scratch folder collapse requested", {
+      path,
+      selectedBefore: scratchSelectedPath,
+      expandedBefore: [...scratchExpanded],
+    });
+    scratchExpanded.delete(path);
+    for (const expandedPath of [...scratchExpanded]) {
+      if (isDescendant(expandedPath, path)) scratchExpanded.delete(expandedPath);
+    }
+    if (scratchSelectedPath && isSameOrDescendant(scratchSelectedPath, path)) {
+      // If a descendant was selected, move selection to this folder.
+      // If this folder itself was selected, keep it selected.
+      // Mirrors the filesystem toggleExpand collapse behavior.
+      scratchSelectedPath = path;
+      scratchSelectedDir = scratchParentOf(path);
+    }
+
+    console.log(`[RUNTIME_DEBUG] scratchExpanded after:`, [...scratchExpanded]);
+    console.log(`[RUNTIME_DEBUG] scratchSelectedPath after: ${scratchSelectedPath}`);
+    console.log(`[RUNTIME_DEBUG] scratchSelectedDir after: ${scratchSelectedDir}`);
+    console.log(`------------------------------------------\n`);
+
+    debugExplorerTree("scratch folder collapsed", {
+      path,
+      selectedAfter: scratchSelectedPath,
+      expandedAfter: [...scratchExpanded],
+    });
+    renderScratchRoot();
+  }
+
+  function beginRename(target: ContextTarget) {
+    cancelPendingInput();
+    if (target.isScratch) {
+      beginScratchRename(target);
+      return;
+    }
+    beginFilesystemRename(target);
+  }
+
+  function beginFilesystemRename(target: ContextTarget) {
+    const parent = parentOf(target.path);
+    const row = buildInputRow(target.isDir ? "folder" : "file", 0, async (name) => {
+      const trimmed = name.trim();
+      if (!trimmed || trimmed === target.name) return;
+      const next = joinPath(parent, trimmed);
+      try {
+        await ipc.fsRename(target.path, next);
+        renameHandler?.(target.path, next, target.isDir);
+        await refreshLevel(parent);
+      } catch (e) {
+        row.classList.add("create-error");
+        row.title = String(e);
+        setTimeout(() => row.classList.remove("create-error"), 600);
+        const input = row.querySelector("input");
+        input?.focus();
+        throw e;
+      }
+    });
+    replaceRowWithInput(target.row, row, target.name);
+  }
+
+  function beginScratchRename(target: ContextTarget) {
+    const row = buildInputRow(target.isDir ? "folder" : "file", 0, async (name) => {
+      const trimmed = name.trim();
+      if (!trimmed || trimmed === target.name || !scratchRoot) return;
+      if (target.isRoot) {
+        scratchRoot.name = trimmed;
+        scratchRootRenameHandler?.(trimmed);
+        renderScratchRoot();
+        return;
+      }
+      const parent = findScratchFolder(scratchParentOf(target.path));
+      if (!parent) return;
+      if (scratchChildExists(parent, trimmed)) {
+        row.classList.add("create-error");
+        row.title = `${trimmed} already exists`;
+        setTimeout(() => row.classList.remove("create-error"), 600);
+        const input = row.querySelector("input");
+        input?.focus();
+        throw new Error(`${trimmed} already exists`);
+      }
+      const entry = findScratchEntry(target.path);
+      if (!entry) return;
+      const oldPath = entry.path;
+      const nextPath = joinPath(scratchParentOf(entry.path), trimmed);
+      renameScratchEntry(entry, nextPath, trimmed);
+      scratchSelectedPath = entry.path;
+      scratchSelectedDir = entry.kind === "folder" ? entry.path : scratchParentOf(entry.path);
+      renameHandler?.(oldPath, nextPath, entry.kind === "folder");
+      renderScratchRoot();
+    });
+    replaceRowWithInput(target.row, row, target.name);
+  }
+
+  function replaceRowWithInput(row: HTMLElement, inputWrap: HTMLElement, value: string) {
+    const container = row.parentElement;
+    if (!container) return;
+    container.insertBefore(inputWrap, row);
+    row.style.display = "none";
+    pendingInput = inputWrap;
+    const input = inputWrap.querySelector("input")!;
+    input.value = value;
+    input.focus();
+    input.select();
+    input.addEventListener("blur", () => {
+      setTimeout(() => {
+        row.style.display = "";
+      }, 120);
+    }, { once: true });
+  }
+
+  async function deleteTarget(target: ContextTarget) {
+    if (target.isScratch && target.isRoot) {
+      scratchRootDeleteHandler?.();
+      return;
+    }
+    if (confirmDeleteHandler && !(await confirmDeleteHandler(target.path, target.isDir))) {
+      return;
+    }
+    if (target.isScratch) {
+      const entry = findScratchEntry(target.path);
+      if (!entry) return;
+      const parent = findScratchFolder(scratchParentOf(target.path));
+      if (!parent) return;
+      parent.children = parent.children.filter((child) => !samePath(child.path, target.path));
+      deleteHandler?.(target.path, entry.kind === "folder");
+      renderScratchRoot();
+      return;
+    }
+    try {
+      await ipc.fsRemove(target.path);
+      deleteHandler?.(target.path, target.isDir);
+      await refreshLevel(parentOf(target.path));
+    } catch {
+      // Keep the menu lightweight; backend/log surfaces the detailed error.
+    }
+  }
+
+  function findScratchEntry(path: string): ScratchEntry | null {
+    if (!scratchRoot) return null;
+    if (samePath(scratchRoot.path, path)) return scratchRoot;
+    const stack = [...scratchRoot.children];
+    while (stack.length > 0) {
+      const entry = stack.shift()!;
+      if (samePath(entry.path, path)) return entry;
+      if (entry.kind === "folder") stack.push(...entry.children);
+    }
+    return null;
+  }
+
+  function renameScratchEntry(entry: ScratchEntry, nextPath: string, nextName: string) {
+    const oldPath = entry.path;
+    entry.path = nextPath;
+    entry.name = nextName;
+    if (entry.kind === "folder") {
+      const children = [...entry.children];
+      while (children.length > 0) {
+        const child = children.shift()!;
+        child.path = joinPath(entry.path, child.path.slice(oldPath.length).replace(/^[\\/]+/, ""));
+        if (child.kind === "folder") children.push(...child.children);
+      }
+    }
   }
 
   function findScratchFolder(path: string): ScratchFolder | null {
@@ -640,7 +1056,10 @@ export function mountExplorer(host: HTMLElement): ExplorerBinding {
       document
         .querySelectorAll(".file-tree-node.selected")
         .forEach((n) => n.classList.remove("selected"));
+      selectedPath = null;
       selectedDir = null;
+      scratchSelectedPath = scratchRoot?.path ?? null;
+      scratchSelectedDir = scratchRoot?.path ?? null;
     }
   });
 
@@ -666,6 +1085,21 @@ export function mountExplorer(host: HTMLElement): ExplorerBinding {
     },
     onFileCreated(handler) {
       fileCreatedHandler = handler;
+    },
+    onRename(handler) {
+      renameHandler = handler;
+    },
+    onDelete(handler) {
+      deleteHandler = handler;
+    },
+    onConfirmDelete(handler) {
+      confirmDeleteHandler = handler;
+    },
+    onScratchRootRename(handler) {
+      scratchRootRenameHandler = handler;
+    },
+    onScratchRootDelete(handler) {
+      scratchRootDeleteHandler = handler;
     },
     beginCreate,
     applyEvent,

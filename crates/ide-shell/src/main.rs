@@ -85,6 +85,8 @@ fn main() {
             cmd_fs_write,
             cmd_fs_create_file,
             cmd_fs_create_dir,
+            cmd_fs_rename,
+            cmd_fs_remove,
             cmd_pty_open,
             cmd_python_run,
             cmd_process_kill,
@@ -376,6 +378,19 @@ fn cmd_fs_create_file(state: State<'_, AppState>, path: String) -> Result<(), St
 #[tauri::command]
 fn cmd_fs_create_dir(state: State<'_, AppState>, path: String) -> Result<(), String> {
     state.fs.create_dir(Path::new(&path)).map_err(to_err)
+}
+
+#[tauri::command]
+fn cmd_fs_rename(state: State<'_, AppState>, from: String, to: String) -> Result<(), String> {
+    state
+        .fs
+        .rename(Path::new(&from), Path::new(&to))
+        .map_err(to_err)
+}
+
+#[tauri::command]
+fn cmd_fs_remove(state: State<'_, AppState>, path: String) -> Result<(), String> {
+    state.fs.remove(Path::new(&path)).map_err(to_err)
 }
 
 // ---------- Python run ----------

@@ -17,6 +17,7 @@ export interface ConfirmSaveOptions {
 
 export interface PromptNameOptions {
   title: string;
+  description?: string;
   label: string;
   initialValue?: string;
   confirmLabel?: string;
@@ -107,6 +108,13 @@ export function promptName(opts: PromptNameOptions): Promise<string | null> {
     title.className = "modal-title";
     title.textContent = opts.title;
     box.appendChild(title);
+
+    if (opts.description) {
+      const desc = document.createElement("p");
+      desc.className = "modal-body";
+      desc.textContent = opts.description;
+      box.appendChild(desc);
+    }
 
     const label = document.createElement("label");
     label.className = "modal-field-label";
