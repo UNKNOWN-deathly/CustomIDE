@@ -83,9 +83,20 @@ export const ipc = {
     invoke<{ id: string; interpreter: string }>("cmd_python_run", {
       payload: { file, args, cols: dims?.cols, rows: dims?.rows },
     }),
+  ptyOpen: (dims?: { cols: number; rows: number }) =>
+    invoke<{ id: string }>("cmd_pty_open", {
+      payload: { cols: dims?.cols, rows: dims?.rows },
+    }),
   processKill: (id: string) => invoke<boolean>("cmd_process_kill", { id }),
-  ptyWrite: (id: string, data: string) =>
-    invoke<void>("cmd_pty_write", { id, data }),
+  ptyWrite: (id: string, data: string) => {
+    console.debug("[terminal-input] invoke cmd_pty_write", {
+      id,
+      length: data.length,
+      escaped: escapeForLog(data),
+      codes: Array.from(data).map((ch) => ch.codePointAt(0) ?? 0),
+    });
+    return invoke<void>("cmd_pty_write", { id, data });
+  },
   ptyResize: (id: string, cols: number, rows: number) =>
     invoke<void>("cmd_pty_resize", { id, cols, rows }),
   ptyClose: (id: string) => invoke<boolean>("cmd_pty_close", { id }),
@@ -100,6 +111,17 @@ export const ipc = {
   docDidClose: (path: string) =>
     invoke<void>("cmd_doc_did_close", { path }),
 };
+
+function escapeForLog(value: string) {
+  return value
+    .replace(/\\/g, "\\\\")
+    .replace(/\r/g, "\\r")
+    .replace(/\n/g, "\\n")
+    .replace(/\t/g, "\\t")
+    .replace(/\x1b/g, "\\x1b")
+    .replace(/\x03/g, "\\x03")
+    .replace(/\x04/g, "\\x04");
+}
 
 export async function onCoreEvent(
   handler: (evt: CoreEvent) => void

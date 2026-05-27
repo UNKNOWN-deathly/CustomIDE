@@ -22,6 +22,7 @@ function normPath(p: string): string {
 async function bootstrap() {
   let activePtyId: string | null = null;
   let changeTimer: number | null = null;
+  let terminalFocused = false;
 
   // path-key -> { path, items } so we always know how to clear / re-render.
   const diagnostics = new Map<string, { path: string; items: CoreDiagnostic[] }>();
@@ -34,6 +35,16 @@ async function bootstrap() {
   const explorer = mountExplorer($("panel-explorer"));
   const terminal = mountTerminal($("terminal"));
   const problems = mountProblems($("problems"));
+  const editorHost = $("editor");
+  const editorEmptyState = $("editor-empty-state");
+  terminal.onFocusChange((focused) => {
+    terminalFocused = focused;
+  });
+
+  function showEditor(active: boolean) {
+    editorHost.classList.toggle("hidden", !active);
+    editorEmptyState.classList.toggle("hidden", active);
+  }
 
   function scheduleDidChange() {
     const tab = tabs.active();
@@ -68,11 +79,14 @@ async function bootstrap() {
 
   tabs.onActiveChange((tab) => {
     if (tab) {
+      showEditor(true);
       editor.setDoc(tab.content, tab.path);
+      editor.view.requestMeasure();
       // Re-apply any known diagnostics for this file (avoid stale set from previous tab).
       pushDiagsToEditor(tab.path);
       editor.focus();
     } else {
+      showEditor(false);
       editor.setDoc("", "");
       editor.setDiagnostics([]);
     }
@@ -149,6 +163,24 @@ async function bootstrap() {
     ipc.ptyResize(activePtyId, cols, rows).catch(() => {});
   });
 
+  $("btn-shell").onclick = async () => {
+    if (activePtyId) {
+      ipc.ptyClose(activePtyId).catch(() => {});
+      activePtyId = null;
+      terminal.detachSession();
+    }
+    showBottom("terminal");
+    terminal.fit();
+    try {
+      const dims = terminal.dimensions();
+      const { id } = await ipc.ptyOpen(dims);
+      activePtyId = id;
+      terminal.attachSession(id);
+    } catch (e) {
+      terminal.log(`shell failed: ${String(e)}`);
+    }
+  };
+
   $("btn-run").onclick = async () => {
     const active = tabs.active();
     if (!active) {
@@ -159,6 +191,7 @@ async function bootstrap() {
     if (activePtyId) {
       ipc.ptyClose(activePtyId).catch(() => {});
       activePtyId = null;
+      terminal.detachSession();
     }
     showBottom("terminal");
     terminal.fit();
@@ -279,6 +312,7 @@ async function bootstrap() {
 
   // Keyboard: Ctrl/Cmd+S = save
   window.addEventListener("keydown", (e) => {
+    if (terminalFocused || terminal.isFocused()) return;
     const mod = e.ctrlKey || e.metaKey;
     if (mod && e.key.toLowerCase() === "s") {
       e.preventDefault();

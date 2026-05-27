@@ -121,7 +121,36 @@ html, body, #app {
 }
 .tab .close:hover { background: #3a3a3a; color: #fff; }
 
-#editor { overflow: hidden; min-height: 0; }
+#editor-shell {
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
+  background: #1e1e1e;
+}
+
+#editor-empty-state {
+  height: 100%;
+  display: grid;
+  place-content: center;
+  gap: 8px;
+  text-align: center;
+  color: #8f8f8f;
+  user-select: none;
+}
+#editor-empty-state h1 {
+  margin: 0;
+  color: #d4d4d4;
+  font-size: 18px;
+  font-weight: 500;
+}
+#editor-empty-state p {
+  margin: 0;
+  font-size: 13px;
+}
+#editor-empty-state.hidden { display: none; }
+
+#editor { overflow: hidden; min-height: 0; height: 100%; }
+#editor.hidden { display: none; }
 #editor .cm-editor { height: 100%; }
 #editor .cm-editor.cm-focused { outline: none; }
 #editor .cm-scroller { font-family: Consolas, Menlo, monospace; font-size: 13px; }
@@ -168,6 +197,7 @@ html, body, #app {
 }
 #terminal .xterm { padding: 4px 6px; height: 100%; }
 #terminal .xterm-viewport { background-color: transparent !important; }
+#terminal.terminal-focused { outline: 1px solid #3a6ea5; outline-offset: -1px; }
 
 .problem-row {
   display: grid;

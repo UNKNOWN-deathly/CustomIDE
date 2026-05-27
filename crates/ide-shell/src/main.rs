@@ -31,7 +31,9 @@ struct AppState {
 
 fn main() {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .with_target(false)
         .init();
 
@@ -69,6 +71,7 @@ fn main() {
             cmd_fs_list,
             cmd_fs_read,
             cmd_fs_write,
+            cmd_pty_open,
             cmd_python_run,
             cmd_process_kill,
             cmd_pty_write,
@@ -96,7 +99,9 @@ fn cmd_workspace_open(state: State<'_, AppState>, path: String) -> Result<Worksp
     state.pyright.stop();
     let info = state.workspace.open(&path).map_err(to_err)?;
     state.fs.watch(&info.root).ok();
-    state.bus.publish(CoreEvent::WorkspaceOpened { root: info.root.clone() });
+    state.bus.publish(CoreEvent::WorkspaceOpened {
+        root: info.root.clone(),
+    });
 
     // Best-effort: start Pyright if we have a python env and the binary is on PATH.
     if let Some(env) = &info.python {
@@ -164,11 +169,27 @@ struct PtyRunArgs {
     rows: Option<u16>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+struct PtyOpenArgs {
+    #[serde(default)]
+    cols: Option<u16>,
+    #[serde(default)]
+    rows: Option<u16>,
+}
+
+#[derive(Debug, Serialize)]
+struct PtyOpenResult {
+    id: String,
+}
+
 // Run File goes through the PTY so input() / interactive REPLs work.
 // Returns the PTY session id as `id` (same shape as before) — the frontend
 // reuses this id for cmd_pty_write / cmd_pty_resize / cmd_pty_close.
 #[tauri::command]
-fn cmd_python_run(state: State<'_, AppState>, payload: PtyRunArgs) -> Result<PythonRunResult, String> {
+fn cmd_python_run(
+    state: State<'_, AppState>,
+    payload: PtyRunArgs,
+) -> Result<PythonRunResult, String> {
     let root = state.workspace.root().map_err(to_err)?;
     let env = python_env::detect(&root).map_err(to_err)?;
     // `-u` keeps stdout/stderr unbuffered so prompts appear immediately even
@@ -186,7 +207,35 @@ fn cmd_python_run(state: State<'_, AppState>, payload: PtyRunArgs) -> Result<Pyt
             env: vec![],
         })
         .map_err(to_err)?;
-    Ok(PythonRunResult { id, interpreter: env.interpreter })
+    Ok(PythonRunResult {
+        id,
+        interpreter: env.interpreter,
+    })
+}
+
+#[tauri::command]
+fn cmd_pty_open(
+    state: State<'_, AppState>,
+    payload: Option<PtyOpenArgs>,
+) -> Result<PtyOpenResult, String> {
+    let payload = payload.unwrap_or_default();
+    let cwd = state
+        .workspace
+        .current()
+        .map(|info| info.root)
+        .or_else(|| std::env::current_dir().ok());
+    let id = state
+        .pty
+        .open(PtySpec {
+            program: None,
+            args: vec![],
+            cwd,
+            cols: payload.cols.unwrap_or(120),
+            rows: payload.rows.unwrap_or(30),
+            env: vec![],
+        })
+        .map_err(to_err)?;
+    Ok(PtyOpenResult { id })
 }
 
 // Non-interactive process kill (kept for ProcessRunner-spawned jobs). For PTY
@@ -203,11 +252,23 @@ fn cmd_process_kill(state: State<'_, AppState>, id: String) -> Result<bool, Stri
 
 #[tauri::command]
 fn cmd_pty_write(state: State<'_, AppState>, id: String, data: String) -> Result<(), String> {
+    tracing::info!(
+        target: "customide::pty",
+        id = %id,
+        bytes = data.len(),
+        data = %data.escape_debug(),
+        "cmd_pty_write received"
+    );
     state.pty.write(&id, data.as_bytes()).map_err(to_err)
 }
 
 #[tauri::command]
-fn cmd_pty_resize(state: State<'_, AppState>, id: String, cols: u16, rows: u16) -> Result<(), String> {
+fn cmd_pty_resize(
+    state: State<'_, AppState>,
+    id: String,
+    cols: u16,
+    rows: u16,
+) -> Result<(), String> {
     state.pty.resize(&id, cols, rows).map_err(to_err)
 }
 
@@ -255,7 +316,11 @@ fn cmd_doc_did_open(state: State<'_, AppState>, path: String, text: String) -> R
 }
 
 #[tauri::command]
-fn cmd_doc_did_change(state: State<'_, AppState>, path: String, text: String) -> Result<(), String> {
+fn cmd_doc_did_change(
+    state: State<'_, AppState>,
+    path: String,
+    text: String,
+) -> Result<(), String> {
     let _ = state.pyright.did_change(Path::new(&path), &text);
     Ok(())
 }

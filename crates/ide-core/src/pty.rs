@@ -53,6 +53,15 @@ impl PtyManager {
 
     pub fn open(&self, spec: PtySpec) -> IdeResult<String> {
         let pty_system = NativePtySystem::default();
+        tracing::info!(
+            target: "customide::pty",
+            cols = spec.cols,
+            rows = spec.rows,
+            cwd = ?spec.cwd,
+            program = ?spec.program,
+            args = ?spec.args,
+            "PtyManager::open requested"
+        );
         let pair = pty_system
             .openpty(PtySize {
                 rows: spec.rows,
@@ -93,6 +102,14 @@ impl PtyManager {
             .master
             .take_writer()
             .map_err(|e| IdeError::other(format!("pty writer: {e}")))?;
+        tracing::info!(
+            target: "customide::pty",
+            program = %program,
+            cwd = ?spec.cwd,
+            cols = spec.cols,
+            rows = spec.rows,
+            "PtyManager::open writer ready"
+        );
 
         let id = Uuid::new_v4().to_string();
         let session = Arc::new(Mutex::new(Session {
@@ -101,6 +118,12 @@ impl PtyManager {
             _child: child,
         }));
         self.sessions.lock().insert(id.clone(), session);
+        tracing::info!(
+            target: "customide::pty",
+            id = %id,
+            program = %program,
+            "PtyManager::open session inserted"
+        );
 
         self.bus.publish(Event::ProcessStarted { id: id.clone(), cmd: display });
 
@@ -129,15 +152,55 @@ impl PtyManager {
     }
 
     pub fn write(&self, id: &str, data: &[u8]) -> IdeResult<()> {
-        let session = self
-            .sessions
-            .lock()
-            .get(id)
-            .cloned()
-            .ok_or_else(|| IdeError::other(format!("no pty session: {id}")))?;
+        tracing::info!(
+            target: "customide::pty",
+            id = %id,
+            bytes = data.len(),
+            data = %String::from_utf8_lossy(data).escape_debug(),
+            "PtyManager::write requested"
+        );
+        let session = {
+            let sessions = self.sessions.lock();
+            let session = sessions.get(id).cloned();
+            tracing::info!(
+                target: "customide::pty",
+                id = %id,
+                exists = session.is_some(),
+                sessions = sessions.len(),
+                "PtyManager::write session lookup"
+            );
+            session.ok_or_else(|| IdeError::other(format!("no pty session: {id}")))?
+        };
         let mut s = session.lock();
-        s.writer.write_all(data)?;
-        s.writer.flush()?;
+        if let Err(err) = s.writer.write_all(data) {
+            tracing::warn!(
+                target: "customide::pty",
+                id = %id,
+                error = %err,
+                "PtyManager::write write_all failed"
+            );
+            return Err(err.into());
+        }
+        tracing::info!(
+            target: "customide::pty",
+            id = %id,
+            bytes = data.len(),
+            "PtyManager::write write_all succeeded"
+        );
+        if let Err(err) = s.writer.flush() {
+            tracing::warn!(
+                target: "customide::pty",
+                id = %id,
+                error = %err,
+                "PtyManager::write flush failed"
+            );
+            return Err(err.into());
+        }
+        tracing::info!(
+            target: "customide::pty",
+            id = %id,
+            "PtyManager::write flush succeeded"
+        );
         Ok(())
     }
 
