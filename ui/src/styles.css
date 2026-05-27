@@ -108,6 +108,63 @@ body.resizing #bottom-content {
 }
 .spacer { flex: 1; }
 
+.run-target-popover {
+  position: fixed;
+  z-index: 300;
+  width: 280px;
+  padding: 10px;
+  background: #25272c;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.32);
+}
+.run-target-popover.hidden { display: none; }
+.run-target-title {
+  color: var(--text-muted);
+  font-size: 12px;
+  margin: 0 0 8px 2px;
+}
+.run-target-popover button {
+  width: 100%;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-main);
+  cursor: pointer;
+  text-align: left;
+  font-size: 12px;
+}
+.run-target-primary {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px;
+  background: var(--accent-bg) !important;
+}
+.run-target-primary:hover {
+  background: rgba(75, 139, 190, 0.22) !important;
+}
+.run-target-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+.run-target-reason {
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+.run-target-action {
+  margin-top: 4px;
+  padding: 6px 8px;
+  color: var(--text-muted) !important;
+}
+.run-target-action:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-main) !important;
+}
+
 /* Main Body Layout */
 #body {
   display: grid;

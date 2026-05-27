@@ -3,12 +3,18 @@
 
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
-import { ipc, onCoreEvent, type CoreDiagnostic, type CoreEvent, type WorkspaceInfo } from "./ipc";
+import { ipc, onCoreEvent, type CoreDiagnostic, type CoreEvent, type RecentProject, type WorkspaceInfo } from "./ipc";
 import { mountEditor } from "./editor";
 import { mountTabs } from "./tabs";
 import { mountExplorer } from "./explorer";
 import { mountTerminal } from "./terminal";
 import { mountProblems, type ProblemEntry } from "./problems";
+import {
+  chooseRunTarget,
+  rememberRunTarget,
+  suppressRunPrompt,
+  type RunTargetSuggestion,
+} from "./runTarget";
 
 const $ = <T extends HTMLElement>(id: string) =>
   document.getElementById(id) as T;
@@ -17,6 +23,13 @@ const $ = <T extends HTMLElement>(id: string) =>
 // diagnostic event paths after a round trip through file:// URIs.
 function normPath(p: string): string {
   return p.replace(/\\/g, "/").toLowerCase();
+}
+
+function debugRecentProjects(message: string, details?: Record<string, unknown>) {
+  const payload = details ?? {};
+  if (localStorage.getItem("customide.debug.recentProjects") === "1") {
+    console.debug(`[recent-projects] ${message}`, payload);
+  }
 }
 
 async function bootstrap() {
@@ -37,19 +50,19 @@ async function bootstrap() {
   const problems = mountProblems($("problems"));
   const editorHost = $("editor");
   const editorEmptyState = $("editor-empty-state");
+  const runButton = $("btn-run");
+  const runTargetPopover = $("run-target-popover");
+  const runTargetSuggestion = $("run-target-suggestion");
+  const runTargetCurrent = $("run-target-current");
+  const runTargetSuppress = $("run-target-suppress");
   terminal.onFocusChange((focused) => {
     terminalFocused = focused;
   });
 
   let currentWorkspace: WorkspaceInfo | null = null;
+  let recentProjects: RecentProject[] = [];
 
-  interface RecentProject {
-    name: string;
-    path: string;
-    lastOpened: number;
-  }
-
-  function getRecentProjects(): RecentProject[] {
+  function getLocalRecentProjects(): RecentProject[] {
     try {
       const raw = localStorage.getItem("customide.recentProjects");
       if (!raw) return [];
@@ -63,33 +76,88 @@ async function bootstrap() {
     return [];
   }
 
-  function addToRecentProjects(path: string, name: string) {
-    const maxRecent = 10;
-    let list = getRecentProjects();
-    
-    // Deduplicate (case-insensitive path comparison)
-    list = list.filter(p => normPath(p.path) !== normPath(path));
-    
-    list.unshift({
+  async function loadRecentProjects() {
+    try {
+      recentProjects = trimRecentProjects(await ipc.recentProjectsGet());
+      debugRecentProjects("loaded from backend", {
+        count: recentProjects.length,
+        paths: recentProjects.map((project) => project.path),
+      });
+      if (recentProjects.length === 0) {
+        const local = getLocalRecentProjects();
+        debugRecentProjects("backend empty; checked localStorage fallback", {
+          count: local.length,
+          paths: local.map((project) => project.path),
+        });
+        if (local.length > 0) {
+          recentProjects = trimRecentProjects(local);
+          await persistRecentProjects();
+        }
+      }
+    } catch (e) {
+      console.error("Error loading recent projects", e);
+      recentProjects = trimRecentProjects(getLocalRecentProjects());
+    }
+  }
+
+  async function persistRecentProjects() {
+    localStorage.setItem("customide.recentProjects", JSON.stringify(recentProjects));
+    try {
+      await ipc.recentProjectsSet(recentProjects);
+      debugRecentProjects("persisted", {
+        count: recentProjects.length,
+        paths: recentProjects.map((project) => project.path),
+      });
+    } catch (e) {
+      console.error("Error saving recent projects", e);
+    }
+  }
+
+  async function addToRecentProjects(path: string, name: string) {
+    recentProjects = recentProjects.filter(p => normPath(p.path) !== normPath(path));
+    recentProjects.unshift({
       name: name,
       path: path,
       lastOpened: Date.now()
     });
-    
-    if (list.length > maxRecent) {
-      list = list.slice(0, maxRecent);
+    recentProjects = trimRecentProjects(recentProjects);
+    await persistRecentProjects();
+  }
+
+  function trimRecentProjects(projects: RecentProject[]) {
+    return projects.slice(0, 4);
+  }
+
+  function pathBelongsToWorkspace(path: string, workspaceRoot: string) {
+    const root = normPath(workspaceRoot).replace(/\/+$/, "");
+    const file = normPath(path);
+    return file === root || file.startsWith(`${root}/`);
+  }
+
+  function workspaceTabPaths(workspaceRoot: string) {
+    return tabs
+      .all()
+      .map((tab) => tab.path)
+      .filter((path) => pathBelongsToWorkspace(path, workspaceRoot));
+  }
+
+  async function persistWorkspaceTabState() {
+    if (!currentWorkspace) return;
+    const openFiles = workspaceTabPaths(currentWorkspace.root);
+    await ipc.workspaceOpenFilesSet(currentWorkspace.root, openFiles);
+
+    const active = tabs.active();
+    if (active && pathBelongsToWorkspace(active.path, currentWorkspace.root)) {
+      await ipc.workspaceLastActiveFileSet(currentWorkspace.root, active.path);
     }
-    
-    localStorage.setItem("customide.recentProjects", JSON.stringify(list));
   }
 
-  function removeRecentProject(path: string) {
-    let list = getRecentProjects();
-    list = list.filter(p => normPath(p.path) !== normPath(path));
-    localStorage.setItem("customide.recentProjects", JSON.stringify(list));
+  async function removeRecentProject(path: string) {
+    recentProjects = recentProjects.filter(p => normPath(p.path) !== normPath(path));
+    await persistRecentProjects();
   }
 
-  async function openWorkspace(path: string) {
+  async function openWorkspace(path: string, restoreLastActiveFile = false) {
     diagnostics.clear();
     editor.setDiagnostics([]);
     refreshProblems();
@@ -103,23 +171,73 @@ async function bootstrap() {
         `Workspace opened: ${info.root}` +
           (info.python ? ` (python: ${info.python.version ?? "?"})` : "")
       );
-      addToRecentProjects(info.root, info.name);
+      await addToRecentProjects(info.root, info.name);
+      if (restoreLastActiveFile) {
+        await restoreWorkspaceTabs(info.root);
+      }
       renderEmptyState();
     } catch (e) {
       terminal.log(`Failed to open workspace: ${String(e)}`);
     }
   }
 
+  async function restoreWorkspaceTabs(workspaceRoot: string) {
+    try {
+      const [openFiles, activeFile] = await Promise.all([
+        ipc.workspaceOpenFilesGet(workspaceRoot),
+        ipc.workspaceLastActiveFileGet(workspaceRoot),
+      ]);
+      const orderedFiles = dedupePaths([
+        ...openFiles.filter((path) => !activeFile || normPath(path) !== normPath(activeFile)),
+        ...(activeFile ? [activeFile] : []),
+      ]);
+      for (const path of orderedFiles) {
+        try {
+          await tabs.open(path);
+        } catch (e) {
+          terminal.log(`Could not restore tab ${path}: ${String(e)}`);
+        }
+      }
+    } catch (e) {
+      terminal.log(`Could not restore workspace tabs: ${String(e)}`);
+    }
+  }
+
+  function dedupePaths(paths: string[]) {
+    const seen = new Set<string>();
+    const deduped: string[] = [];
+    for (const path of paths) {
+      const key = normPath(path);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      deduped.push(path);
+    }
+    return deduped;
+  }
+
   function renderEmptyState() {
     const listContainer = $("recent-projects-list");
     const recentSection = $("recent-projects-section");
-    const shortcutsSection = $("empty-state-shortcuts");
+    const shortcutsSection = document.querySelector<HTMLElement>(".empty-state-shortcuts");
     
-    if (!listContainer || !recentSection || !shortcutsSection) return;
+    if (!listContainer || !recentSection || !shortcutsSection) {
+      debugRecentProjects("render empty state skipped: missing DOM", {
+        hasListContainer: Boolean(listContainer),
+        hasRecentSection: Boolean(recentSection),
+        hasShortcutsSection: Boolean(shortcutsSection),
+      });
+      return;
+    }
 
-    const recents = getRecentProjects();
+    const recents = recentProjects;
+    const shouldShowRecents = !currentWorkspace && recents.length > 0;
+    debugRecentProjects("render empty state", {
+      currentWorkspace: currentWorkspace?.root ?? null,
+      count: recents.length,
+      showRecents: shouldShowRecents,
+    });
     
-    if (!currentWorkspace && recents.length > 0) {
+    if (shouldShowRecents) {
       recentSection.classList.remove("hidden");
       shortcutsSection.classList.add("hidden");
       
@@ -156,14 +274,13 @@ async function bootstrap() {
         
         removeBtn.onclick = (e) => {
           e.stopPropagation();
-          removeRecentProject(proj.path);
-          renderEmptyState();
+          removeRecentProject(proj.path).then(() => renderEmptyState());
         };
         
         row.appendChild(removeBtn);
         
         row.onclick = () => {
-          openWorkspace(proj.path);
+          openWorkspace(proj.path, true);
         };
         
         listContainer.appendChild(row);
@@ -172,6 +289,16 @@ async function bootstrap() {
       recentSection.classList.add("hidden");
       shortcutsSection.classList.remove("hidden");
     }
+    debugRecentProjects("render empty state applied", {
+      recentSectionHidden: recentSection.classList.contains("hidden"),
+      shortcutsHidden: shortcutsSection.classList.contains("hidden"),
+      listChildren: listContainer.children.length,
+      editorEmptyStateHidden: editorEmptyState.classList.contains("hidden"),
+      editorHostHidden: editorHost.classList.contains("hidden"),
+      activeTab: tabs.active()?.path ?? null,
+      currentWorkspace: currentWorkspace?.root ?? null,
+      recentCount: recents.length,
+    });
   }
 
   function showEditor(active: boolean) {
@@ -180,6 +307,49 @@ async function bootstrap() {
     if (!active) {
       renderEmptyState();
     }
+  }
+
+  function hideRunTargetPopover() {
+    runTargetPopover.classList.add("hidden");
+    runTargetSuggestion.replaceChildren();
+    runTargetCurrent.onclick = null;
+    runTargetSuppress.onclick = null;
+  }
+
+  function showRunTargetPopover(activePath: string, suggestion: RunTargetSuggestion) {
+    runTargetSuggestion.replaceChildren();
+    const label = document.createElement("span");
+    label.className = "run-target-path";
+    label.textContent = suggestion.label;
+    const reason = document.createElement("span");
+    reason.className = "run-target-reason";
+    reason.textContent = suggestion.reason;
+    runTargetSuggestion.appendChild(label);
+    runTargetSuggestion.appendChild(reason);
+
+    runTargetSuggestion.onclick = async () => {
+      hideRunTargetPopover();
+      try {
+        await tabs.open(suggestion.path);
+        await runFile(suggestion.path);
+      } catch (e) {
+        terminal.log(`run failed: ${String(e)}`);
+      }
+    };
+    runTargetCurrent.onclick = () => {
+      hideRunTargetPopover();
+      runFile(activePath);
+    };
+    runTargetSuppress.onclick = () => {
+      suppressRunPrompt(activePath);
+      hideRunTargetPopover();
+      runFile(activePath);
+    };
+
+    const rect = runButton.getBoundingClientRect();
+    runTargetPopover.style.top = `${rect.bottom + 6}px`;
+    runTargetPopover.style.left = `${Math.max(8, rect.right - 280)}px`;
+    runTargetPopover.classList.remove("hidden");
   }
 
   function scheduleDidChange() {
@@ -221,6 +391,9 @@ async function bootstrap() {
       // Re-apply any known diagnostics for this file (avoid stale set from previous tab).
       pushDiagsToEditor(tab.path);
       editor.focus();
+      if (currentWorkspace) {
+        persistWorkspaceTabState().catch(() => {});
+      }
     } else {
       showEditor(false);
       editor.setDoc("", "");
@@ -239,6 +412,7 @@ async function bootstrap() {
         ipc.docDidOpen(path, cur.content).catch(() => {});
       }
     }
+    persistWorkspaceTabState().catch(() => {});
   };
 
   // tabs.close -> notify Pyright + drop local diagnostics for that path.
@@ -248,6 +422,7 @@ async function bootstrap() {
     diagnostics.delete(normPath(path));
     refreshProblems();
     baseClose(path);
+    persistWorkspaceTabState().catch(() => {});
   };
 
   // tabs.saveActive -> notify Pyright with new text.
@@ -314,13 +489,11 @@ async function bootstrap() {
     }
   };
 
-  $("btn-run").onclick = async () => {
+  async function runFile(path: string) {
     const active = tabs.active();
-    if (!active) {
-      terminal.log("No file open.");
-      return;
+    if (active && normPath(active.path) === normPath(path) && active.dirty) {
+      await tabs.saveActive(editor.getDoc());
     }
-    if (active.dirty) await tabs.saveActive(editor.getDoc());
     if (activePtyId) {
       ipc.ptyClose(activePtyId).catch(() => {});
       activePtyId = null;
@@ -330,12 +503,30 @@ async function bootstrap() {
     terminal.fit();
     try {
       const dims = terminal.dimensions();
-      const { id } = await ipc.pythonRun(active.path, [], dims);
+      const { id } = await ipc.pythonRun(path, [], dims);
       activePtyId = id;
       terminal.attachSession(id);
+      rememberRunTarget(currentWorkspace, path);
     } catch (e) {
       terminal.log(`run failed: ${String(e)}`);
     }
+  }
+
+  runButton.onclick = async () => {
+    hideRunTargetPopover();
+    const active = tabs.active();
+    if (!active) {
+      terminal.log("No file open.");
+      return;
+    }
+
+    const decision = await chooseRunTarget(active, editor.getDoc(), currentWorkspace);
+    if (decision.shouldPrompt && decision.suggestion) {
+      showRunTargetPopover(active.path, decision.suggestion);
+      return;
+    }
+
+    await runFile(active.path);
   };
 
   $("btn-ruff").onclick = async () => {
@@ -389,7 +580,9 @@ async function bootstrap() {
   });
 
   // Backend events
+  debugRecentProjects("before core event listener registration");
   await onCoreEvent((evt) => routeEvent(evt));
+  debugRecentProjects("after core event listener registration");
 
   function routeEvent(evt: CoreEvent) {
     terminal.applyEvent(evt);
@@ -447,12 +640,22 @@ async function bootstrap() {
 
   // Keyboard: Ctrl/Cmd+S = save
   window.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      hideRunTargetPopover();
+    }
     if (terminalFocused || terminal.isFocused()) return;
     const mod = e.ctrlKey || e.metaKey;
     if (mod && e.key.toLowerCase() === "s") {
       e.preventDefault();
       $("btn-save").click();
     }
+  });
+
+  document.addEventListener("mousedown", (e) => {
+    const target = e.target as Node;
+    if (runTargetPopover.classList.contains("hidden")) return;
+    if (runTargetPopover.contains(target) || runButton.contains(target)) return;
+    hideRunTargetPopover();
   });
 
   function initResizing() {
@@ -537,14 +740,23 @@ async function bootstrap() {
 
   initResizing();
   refreshProblems(); // render empty placeholder
+  await loadRecentProjects();
+  renderEmptyState();
 
   // Check if a workspace is already open on startup
   ipc.workspaceInfo().then((info) => {
+    debugRecentProjects("startup workspaceInfo resolved", {
+      workspace: info?.root ?? null,
+      recentCount: recentProjects.length,
+    });
     if (info) {
       currentWorkspace = info;
       $("workspace-label").textContent = `${info.name} — ${info.python?.interpreter ?? "no python"}`;
       explorer.setRoot(info.root).catch(() => {});
-      addToRecentProjects(info.root, info.name);
+      debugRecentProjects("startup workspace found; recording recent project", {
+        path: info.root,
+      });
+      addToRecentProjects(info.root, info.name).catch(() => {});
     }
     renderEmptyState();
   }).catch((e) => {

@@ -23,6 +23,14 @@
   - **Evidence**: Startup code mounts `mountEditor($("editor"), ...)` before any tab is opened; tab state remains empty until `tabs.open(path)`.
   - **Status**: Fixed (unverified)
 
+- [ ] **BUG-4: Recent Projects do not persist after app relaunch** - `High`
+  - **File**: `ui/src/main.ts` (line 153-220), `crates/ide-shell/src/main.rs` (line 144-210), `crates/ide-core/src/settings.rs` (line 91-102)
+  - **Issue**: Recent Projects are visible while the app stays open but disappear after a full close/relaunch.
+  - **Probable cause**: Runtime tracing proved persistence and hydration worked, but `renderEmptyState()` aborted because it queried `id="empty-state-shortcuts"` while the DOM element only had class `.empty-state-shortcuts`; the recent section stayed hidden and the list was never populated.
+  - **Fix**: Use the existing `.empty-state-shortcuts` selector, keep Recent Projects as user-level persisted state, render immediately after hydration, and leave only gated console diagnostics.
+  - **Evidence**: Relaunch trace before the fix showed backend returned one project and frontend loaded it, then skipped render with `hasShortcutsSection:false`; after the selector fix the trace showed `listChildren:1`, `recentSectionHidden:false`, `shortcutsHidden:true`, and `editorEmptyStateHidden:false`.
+  - **Status**: Fixed (unverified)
+
 ## Needs Confirmation
 
 ## Resolved Issues

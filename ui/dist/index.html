@@ -4,8 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>CustomIDE</title>
-    <script type="module" crossorigin src="/assets/index-Ce7SLG2t.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-DK698G7o.css">
+    <script type="module" crossorigin src="/assets/index-BcVLpTF_.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-CyXwofTK.css">
   </head>
   <body>
     <div id="app">
@@ -18,6 +18,12 @@
         <button id="btn-ruff">Run Ruff</button>
         <button id="btn-save">Save</button>
       </header>
+      <div id="run-target-popover" class="run-target-popover hidden">
+        <div class="run-target-title">Did you mean to run:</div>
+        <button id="run-target-suggestion" class="run-target-primary"></button>
+        <button id="run-target-current" class="run-target-action">No, run this file</button>
+        <button id="run-target-suppress" class="run-target-action">Don't ask again for this file</button>
+      </div>
       <main id="body">
         <aside id="sidebar">
           <nav id="activity-rail">

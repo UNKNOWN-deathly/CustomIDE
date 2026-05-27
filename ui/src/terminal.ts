@@ -10,7 +10,6 @@ import "@xterm/xterm/css/xterm.css";
 
 import { ipc, type CoreEvent } from "./ipc";
 
-const TERMINAL_INPUT_DEBUG = true;
 const CUSTOM_KEY_HANDLER_ENABLED =
   window.localStorage.getItem("customide.terminal.customKeyHandler") === "1";
 
@@ -251,7 +250,7 @@ export function mountTerminal(host: HTMLElement): TerminalBinding {
 }
 
 function debugInput(message: string, details: Record<string, unknown>) {
-  if (!TERMINAL_INPUT_DEBUG) return;
+  if (localStorage.getItem("customide.debug.terminalInput") !== "1") return;
   console.debug(`[terminal-input] ${message}`, details);
 }
 

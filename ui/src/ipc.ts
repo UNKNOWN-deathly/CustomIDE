@@ -27,6 +27,12 @@ export interface DirEntry {
   is_dir: boolean;
 }
 
+export interface RecentProject {
+  name: string;
+  path: string;
+  lastOpened: number;
+}
+
 export interface RuffDiagnostic {
   filename: string;
   code: string | null;
@@ -71,6 +77,26 @@ export const ipc = {
     invoke<WorkspaceInfo>("cmd_workspace_open", { path }),
   workspaceInfo: () =>
     invoke<WorkspaceInfo | null>("cmd_workspace_info"),
+  recentProjectsGet: () =>
+    invoke<RecentProject[]>("cmd_recent_projects_get"),
+  recentProjectsSet: (projects: RecentProject[]) =>
+    invoke<void>("cmd_recent_projects_set", { projects }),
+  workspaceLastActiveFileGet: (workspace: string) =>
+    invoke<string | null>("cmd_workspace_last_active_file_get", {
+      payload: { workspace },
+    }),
+  workspaceLastActiveFileSet: (workspace: string, file: string) =>
+    invoke<void>("cmd_workspace_last_active_file_set", {
+      payload: { workspace, file },
+    }),
+  workspaceOpenFilesGet: (workspace: string) =>
+    invoke<string[]>("cmd_workspace_open_files_get", {
+      payload: { workspace },
+    }),
+  workspaceOpenFilesSet: (workspace: string, files: string[]) =>
+    invoke<void>("cmd_workspace_open_files_set", {
+      payload: { workspace, files },
+    }),
   fsList: (path: string) => invoke<DirEntry[]>("cmd_fs_list", { path }),
   fsRead: (path: string) => invoke<string>("cmd_fs_read", { path }),
   fsWrite: (path: string, contents: string) =>
@@ -89,12 +115,14 @@ export const ipc = {
     }),
   processKill: (id: string) => invoke<boolean>("cmd_process_kill", { id }),
   ptyWrite: (id: string, data: string) => {
-    console.debug("[terminal-input] invoke cmd_pty_write", {
-      id,
-      length: data.length,
-      escaped: escapeForLog(data),
-      codes: Array.from(data).map((ch) => ch.codePointAt(0) ?? 0),
-    });
+    if (localStorage.getItem("customide.debug.terminalInput") === "1") {
+      console.debug("[terminal-input] invoke cmd_pty_write", {
+        id,
+        length: data.length,
+        escaped: escapeForLog(data),
+        codes: Array.from(data).map((ch) => ch.codePointAt(0) ?? 0),
+      });
+    }
     return invoke<void>("cmd_pty_write", { id, data });
   },
   ptyResize: (id: string, cols: number, rows: number) =>

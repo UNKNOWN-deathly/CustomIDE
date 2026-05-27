@@ -17,6 +17,12 @@
         <button id="btn-ruff">Run Ruff</button>
         <button id="btn-save">Save</button>
       </header>
+      <div id="run-target-popover" class="run-target-popover hidden">
+        <div class="run-target-title">Did you mean to run:</div>
+        <button id="run-target-suggestion" class="run-target-primary"></button>
+        <button id="run-target-current" class="run-target-action">No, run this file</button>
+        <button id="run-target-suppress" class="run-target-action">Don't ask again for this file</button>
+      </div>
       <main id="body">
         <aside id="sidebar">
           <nav id="activity-rail">

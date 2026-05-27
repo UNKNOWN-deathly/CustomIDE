@@ -92,6 +92,14 @@ impl SettingsStore {
         self.merged().read(key)
     }
 
+    pub fn get_user(&self, key: &str) -> Option<Value> {
+        self.user.read().read(key)
+    }
+
+    pub fn user_path(&self) -> PathBuf {
+        self.user_path.clone()
+    }
+
     pub fn set_user(&self, key: &str, value: Value) -> IdeResult<()> {
         self.user.write().set(key, value);
         save(&self.user_path, &*self.user.read())

@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use tauri::{Emitter, State};
 use tracing_subscriber::EnvFilter;
 
@@ -18,6 +19,7 @@ use ide_core::pty::{PtyManager, PtySpec};
 use ide_core::pyright::PyrightManager;
 use ide_core::python_env;
 use ide_core::ruff;
+use ide_core::settings::SettingsStore;
 use ide_core::workspace::{Workspace, WorkspaceInfo};
 
 struct AppState {
@@ -27,6 +29,7 @@ struct AppState {
     runner: ProcessRunner,
     pty: PtyManager,
     pyright: PyrightManager,
+    settings: SettingsStore,
 }
 
 fn main() {
@@ -43,6 +46,8 @@ fn main() {
     let runner = ProcessRunner::new(bus.clone());
     let pty = PtyManager::new(bus.clone());
     let pyright = PyrightManager::new(bus.clone());
+    let settings = SettingsStore::new(SettingsStore::default_user_path())
+        .expect("failed to initialize settings store");
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -53,6 +58,7 @@ fn main() {
             runner,
             pty,
             pyright,
+            settings,
         })
         .setup(move |app| {
             // Bridge ide-core events -> webview events.
@@ -68,6 +74,12 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             cmd_workspace_open,
             cmd_workspace_info,
+            cmd_recent_projects_get,
+            cmd_recent_projects_set,
+            cmd_workspace_last_active_file_get,
+            cmd_workspace_last_active_file_set,
+            cmd_workspace_open_files_get,
+            cmd_workspace_open_files_set,
             cmd_fs_list,
             cmd_fs_read,
             cmd_fs_write,
@@ -99,6 +111,7 @@ fn cmd_workspace_open(state: State<'_, AppState>, path: String) -> Result<Worksp
     state.pyright.stop();
     let info = state.workspace.open(&path).map_err(to_err)?;
     state.fs.watch(&info.root).ok();
+    state.settings.bind_workspace(&info.root).ok();
     state.bus.publish(CoreEvent::WorkspaceOpened {
         root: info.root.clone(),
     });
@@ -131,6 +144,209 @@ fn cmd_workspace_open(state: State<'_, AppState>, path: String) -> Result<Worksp
 #[tauri::command]
 fn cmd_workspace_info(state: State<'_, AppState>) -> Result<Option<WorkspaceInfo>, String> {
     Ok(state.workspace.current())
+}
+
+// ---------- Recent projects ----------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RecentProject {
+    name: String,
+    path: String,
+    last_opened: u64,
+}
+
+const MAX_RECENT_PROJECTS: usize = 4;
+
+#[tauri::command]
+fn cmd_recent_projects_get(state: State<'_, AppState>) -> Result<Vec<RecentProject>, String> {
+    let Some(value) = state.settings.get_user("recentProjects") else {
+        tracing::debug!(
+            target: "customide::recent_projects",
+            settings_path = %state.settings.user_path().display(),
+            raw_count = 0,
+            returned_count = 0,
+            "recent projects loaded"
+        );
+        return Ok(vec![]);
+    };
+    let mut projects: Vec<RecentProject> = serde_json::from_value(value).map_err(to_err)?;
+    let raw_count = projects.len();
+    projects.sort_by(|a, b| b.last_opened.cmp(&a.last_opened));
+    projects.truncate(MAX_RECENT_PROJECTS);
+    tracing::debug!(
+        target: "customide::recent_projects",
+        settings_path = %state.settings.user_path().display(),
+        raw_count,
+        returned_count = projects.len(),
+        "recent projects loaded"
+    );
+    Ok(projects)
+}
+
+#[tauri::command]
+fn cmd_recent_projects_set(
+    state: State<'_, AppState>,
+    projects: Vec<RecentProject>,
+) -> Result<(), String> {
+    let mut clean: Vec<RecentProject> = vec![];
+    let incoming_count = projects.len();
+    for project in projects {
+        if project.name.trim().is_empty() || project.path.trim().is_empty() {
+            continue;
+        }
+        if clean
+            .iter()
+            .any(|existing| same_path(&existing.path, &project.path))
+        {
+            continue;
+        }
+        clean.push(project);
+        if clean.len() >= MAX_RECENT_PROJECTS {
+            break;
+        }
+    }
+    let value = serde_json::to_value(&clean).map_err(to_err)?;
+    tracing::debug!(
+        target: "customide::recent_projects",
+        settings_path = %state.settings.user_path().display(),
+        incoming_count,
+        saved_count = clean.len(),
+        "recent projects saved"
+    );
+    state
+        .settings
+        .set_user("recentProjects", value)
+        .map_err(to_err)
+}
+
+#[derive(Debug, Deserialize)]
+struct LastActiveFileGetArgs {
+    workspace: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LastActiveFileSetArgs {
+    workspace: String,
+    file: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenFilesGetArgs {
+    workspace: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenFilesSetArgs {
+    workspace: String,
+    files: Vec<String>,
+}
+
+#[tauri::command]
+fn cmd_workspace_last_active_file_get(
+    state: State<'_, AppState>,
+    payload: LastActiveFileGetArgs,
+) -> Result<Option<String>, String> {
+    let Some(Value::Object(map)) = state.settings.get_user("workspaceLastActiveFiles") else {
+        return Ok(None);
+    };
+    Ok(map
+        .get(&settings_path_key(&payload.workspace))
+        .and_then(Value::as_str)
+        .map(str::to_string))
+}
+
+#[tauri::command]
+fn cmd_workspace_last_active_file_set(
+    state: State<'_, AppState>,
+    payload: LastActiveFileSetArgs,
+) -> Result<(), String> {
+    if payload.workspace.trim().is_empty() || payload.file.trim().is_empty() {
+        return Ok(());
+    }
+
+    let mut map = match state.settings.get_user("workspaceLastActiveFiles") {
+        Some(Value::Object(map)) => map,
+        _ => Map::new(),
+    };
+    map.insert(
+        settings_path_key(&payload.workspace),
+        Value::String(payload.file),
+    );
+    state
+        .settings
+        .set_user("workspaceLastActiveFiles", Value::Object(map))
+        .map_err(to_err)
+}
+
+#[tauri::command]
+fn cmd_workspace_open_files_get(
+    state: State<'_, AppState>,
+    payload: OpenFilesGetArgs,
+) -> Result<Vec<String>, String> {
+    let Some(Value::Object(map)) = state.settings.get_user("workspaceOpenFiles") else {
+        return Ok(vec![]);
+    };
+    let Some(Value::Array(files)) = map.get(&settings_path_key(&payload.workspace)) else {
+        return Ok(vec![]);
+    };
+    Ok(files
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect())
+}
+
+#[tauri::command]
+fn cmd_workspace_open_files_set(
+    state: State<'_, AppState>,
+    payload: OpenFilesSetArgs,
+) -> Result<(), String> {
+    if payload.workspace.trim().is_empty() {
+        return Ok(());
+    }
+
+    let mut files: Vec<Value> = vec![];
+    for file in payload.files {
+        if file.trim().is_empty() {
+            continue;
+        }
+        if files.iter().any(|existing| {
+            existing
+                .as_str()
+                .map(|path| same_path(path, &file))
+                .unwrap_or(false)
+        }) {
+            continue;
+        }
+        files.push(Value::String(file));
+    }
+
+    let mut map = match state.settings.get_user("workspaceOpenFiles") {
+        Some(Value::Object(map)) => map,
+        _ => Map::new(),
+    };
+    map.insert(settings_path_key(&payload.workspace), Value::Array(files));
+    state
+        .settings
+        .set_user("workspaceOpenFiles", Value::Object(map))
+        .map_err(to_err)
+}
+
+fn settings_path_key(path: &str) -> String {
+    if cfg!(windows) {
+        path.replace('\\', "/").to_lowercase()
+    } else {
+        path.to_string()
+    }
+}
+
+fn same_path(a: &str, b: &str) -> bool {
+    if cfg!(windows) {
+        a.eq_ignore_ascii_case(b)
+    } else {
+        a == b
+    }
 }
 
 // ---------- FS ----------
@@ -252,7 +468,7 @@ fn cmd_process_kill(state: State<'_, AppState>, id: String) -> Result<bool, Stri
 
 #[tauri::command]
 fn cmd_pty_write(state: State<'_, AppState>, id: String, data: String) -> Result<(), String> {
-    tracing::info!(
+    tracing::debug!(
         target: "customide::pty",
         id = %id,
         bytes = data.len(),
