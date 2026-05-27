@@ -320,6 +320,87 @@ async function bootstrap() {
     }
   });
 
+  function initResizing() {
+    const body = $("body");
+    const app = $("app");
+    const sidebarResizer = $("sidebar-resizer");
+    const bottomResizer = $("bottom-resizer");
+
+    const savedSidebarWidth = localStorage.getItem("customide.sidebarWidth");
+    let sidebarWidth = savedSidebarWidth ? parseInt(savedSidebarWidth, 10) : 260;
+    sidebarWidth = Math.max(150, Math.min(sidebarWidth, 600));
+
+    const savedBottomHeight = localStorage.getItem("customide.bottomHeight");
+    let bottomHeight = savedBottomHeight ? parseInt(savedBottomHeight, 10) : 220;
+    bottomHeight = Math.max(80, Math.min(bottomHeight, window.innerHeight - 150));
+
+    body.style.gridTemplateColumns = `${sidebarWidth}px 1px 1fr`;
+    app.style.gridTemplateRows = `36px 1fr 1px ${bottomHeight}px`;
+
+    sidebarResizer.onmousedown = (e) => {
+      e.preventDefault();
+      document.body.classList.add("resizing");
+      const startX = e.clientX;
+      const startWidth = sidebarWidth;
+
+      const onMouseMove = (moveEvent: MouseEvent) => {
+        const deltaX = moveEvent.clientX - startX;
+        let newWidth = startWidth + deltaX;
+        newWidth = Math.max(150, Math.min(newWidth, 600));
+        sidebarWidth = newWidth;
+        body.style.gridTemplateColumns = `${newWidth}px 1px 1fr`;
+      };
+
+      const onMouseUp = () => {
+        document.body.classList.remove("resizing");
+        localStorage.setItem("customide.sidebarWidth", sidebarWidth.toString());
+        document.removeEventListener("mousemove", onMouseMove);
+        document.removeEventListener("mouseup", onMouseUp);
+        terminal.fit();
+      };
+
+      document.addEventListener("mousemove", onMouseMove);
+      document.addEventListener("mouseup", onMouseUp);
+    };
+
+    bottomResizer.onmousedown = (e) => {
+      e.preventDefault();
+      document.body.classList.add("resizing");
+      const startY = e.clientY;
+      const startHeight = bottomHeight;
+
+      const onMouseMove = (moveEvent: MouseEvent) => {
+        const deltaY = moveEvent.clientY - startY;
+        let newHeight = startHeight - deltaY;
+        newHeight = Math.max(80, Math.min(newHeight, window.innerHeight - 150));
+        bottomHeight = newHeight;
+        app.style.gridTemplateRows = `36px 1fr 1px ${newHeight}px`;
+        terminal.fit();
+      };
+
+      const onMouseUp = () => {
+        document.body.classList.remove("resizing");
+        localStorage.setItem("customide.bottomHeight", bottomHeight.toString());
+        document.removeEventListener("mousemove", onMouseMove);
+        document.removeEventListener("mouseup", onMouseUp);
+        terminal.fit();
+      };
+
+      document.addEventListener("mousemove", onMouseMove);
+      document.addEventListener("mouseup", onMouseUp);
+    };
+
+    window.addEventListener("resize", () => {
+      const maxBottomHeight = window.innerHeight - 150;
+      if (bottomHeight > maxBottomHeight) {
+        bottomHeight = Math.max(80, maxBottomHeight);
+        app.style.gridTemplateRows = `36px 1fr 1px ${bottomHeight}px`;
+      }
+      terminal.fit();
+    });
+  }
+
+  initResizing();
   refreshProblems(); // render empty placeholder
 }
 

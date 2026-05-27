@@ -36,9 +36,15 @@ export function mountTabs(host: HTMLElement): TabsBinding {
         (tab.path === activePath ? " active" : "") +
         (tab.dirty ? " modified" : "");
       el.title = tab.path;
+      
       const label = document.createElement("span");
+      label.className = "tab-label";
       label.textContent = tab.name;
       el.appendChild(label);
+      
+      const indicator = document.createElement("span");
+      indicator.className = "tab-indicator";
+      
       const close = document.createElement("span");
       close.className = "close";
       close.textContent = "×";
@@ -46,7 +52,9 @@ export function mountTabs(host: HTMLElement): TabsBinding {
         e.stopPropagation();
         api.close(tab.path);
       };
-      el.appendChild(close);
+      
+      indicator.appendChild(close);
+      el.appendChild(indicator);
       el.onclick = () => api.setActive(tab.path);
       host.appendChild(el);
     }
