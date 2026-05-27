@@ -21,13 +21,17 @@ export function mountExplorer(host: HTMLElement): ExplorerBinding {
   let rootPath: string | null = null;
   const byPath = new Map<string, NodeState>();
 
+  let setRootCallId = 0;
   async function setRoot(root: string) {
     rootPath = root;
-    host.innerHTML = "";
-    byPath.clear();
+    const currentId = ++setRootCallId;
     const entries = await ipc.fsList(root);
-    for (const e of entries) {
-      host.appendChild(buildNode(e, 0));
+    if (currentId === setRootCallId) {
+      host.innerHTML = "";
+      byPath.clear();
+      for (const e of entries) {
+        host.appendChild(buildNode(e, 0));
+      }
     }
   }
 

@@ -32,16 +32,34 @@ export interface TerminalBinding {
 
 export function mountTerminal(host: HTMLElement): TerminalBinding {
   const term = new Terminal({
-    fontFamily: "Consolas, Menlo, monospace",
+    fontFamily: "Consolas, Menlo, Monaco, 'Courier New', monospace",
     fontSize: 13,
+    lineHeight: 1.2,
     cursorBlink: true,
     convertEol: false,           // PTY already supplies CRLF where needed
     scrollback: 5000,
     theme: {
       background: "#1e1e1e",
-      foreground: "#d4d4d4",
-      cursor: "#aeafad",
-      selectionBackground: "#264f78",
+      foreground: "#e2e4e9",     // Matches --text-main
+      cursor: "#8c919d",         // Softer gray cursor (matches --text-muted)
+      cursorAccent: "#1e1e1e",
+      selectionBackground: "rgba(75, 139, 190, 0.3)", // Integrated semi-transparent blue selection
+      black: "#1e1e1e",
+      red: "#f48771",
+      green: "#4ea87d",          // Softer, calm Python green
+      yellow: "#cca700",
+      blue: "#4b8bbe",           // Softer Python blue (matches --accent-color)
+      magenta: "#b180d7",
+      cyan: "#4eb3cd",
+      white: "#e2e4e9",
+      brightBlack: "#585b62",
+      brightRed: "#f48771",
+      brightGreen: "#4ea87d",
+      brightYellow: "#cca700",
+      brightBlue: "#5c9cd0",
+      brightMagenta: "#b180d7",
+      brightCyan: "#4eb3cd",
+      brightWhite: "#ffffff",
     },
   });
   const fit = new FitAddon();

@@ -3,7 +3,7 @@
 
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
-import { ipc, onCoreEvent, type CoreDiagnostic, type CoreEvent } from "./ipc";
+import { ipc, onCoreEvent, type CoreDiagnostic, type CoreEvent, type WorkspaceInfo } from "./ipc";
 import { mountEditor } from "./editor";
 import { mountTabs } from "./tabs";
 import { mountExplorer } from "./explorer";
@@ -41,9 +41,145 @@ async function bootstrap() {
     terminalFocused = focused;
   });
 
+  let currentWorkspace: WorkspaceInfo | null = null;
+
+  interface RecentProject {
+    name: string;
+    path: string;
+    lastOpened: number;
+  }
+
+  function getRecentProjects(): RecentProject[] {
+    try {
+      const raw = localStorage.getItem("customide.recentProjects");
+      if (!raw) return [];
+      const list = JSON.parse(raw);
+      if (Array.isArray(list)) {
+        return list.filter((p: any) => p && typeof p.path === "string" && typeof p.name === "string");
+      }
+    } catch (e) {
+      console.error("Error reading recent projects", e);
+    }
+    return [];
+  }
+
+  function addToRecentProjects(path: string, name: string) {
+    const maxRecent = 10;
+    let list = getRecentProjects();
+    
+    // Deduplicate (case-insensitive path comparison)
+    list = list.filter(p => normPath(p.path) !== normPath(path));
+    
+    list.unshift({
+      name: name,
+      path: path,
+      lastOpened: Date.now()
+    });
+    
+    if (list.length > maxRecent) {
+      list = list.slice(0, maxRecent);
+    }
+    
+    localStorage.setItem("customide.recentProjects", JSON.stringify(list));
+  }
+
+  function removeRecentProject(path: string) {
+    let list = getRecentProjects();
+    list = list.filter(p => normPath(p.path) !== normPath(path));
+    localStorage.setItem("customide.recentProjects", JSON.stringify(list));
+  }
+
+  async function openWorkspace(path: string) {
+    diagnostics.clear();
+    editor.setDiagnostics([]);
+    refreshProblems();
+
+    try {
+      const info = await ipc.workspaceOpen(path);
+      currentWorkspace = info;
+      $("workspace-label").textContent = `${info.name} — ${info.python?.interpreter ?? "no python"}`;
+      await explorer.setRoot(info.root);
+      terminal.log(
+        `Workspace opened: ${info.root}` +
+          (info.python ? ` (python: ${info.python.version ?? "?"})` : "")
+      );
+      addToRecentProjects(info.root, info.name);
+      renderEmptyState();
+    } catch (e) {
+      terminal.log(`Failed to open workspace: ${String(e)}`);
+    }
+  }
+
+  function renderEmptyState() {
+    const listContainer = $("recent-projects-list");
+    const recentSection = $("recent-projects-section");
+    const shortcutsSection = $("empty-state-shortcuts");
+    
+    if (!listContainer || !recentSection || !shortcutsSection) return;
+
+    const recents = getRecentProjects();
+    
+    if (!currentWorkspace && recents.length > 0) {
+      recentSection.classList.remove("hidden");
+      shortcutsSection.classList.add("hidden");
+      
+      listContainer.innerHTML = "";
+      recents.forEach((proj) => {
+        const row = document.createElement("div");
+        row.className = "recent-project-row";
+        row.title = proj.path;
+        
+        const infoDiv = document.createElement("div");
+        infoDiv.className = "recent-project-info";
+        
+        const nameSpan = document.createElement("span");
+        nameSpan.className = "recent-project-name";
+        nameSpan.textContent = proj.name;
+        
+        const pathSpan = document.createElement("span");
+        pathSpan.className = "recent-project-path";
+        pathSpan.textContent = proj.path;
+        
+        infoDiv.appendChild(nameSpan);
+        infoDiv.appendChild(pathSpan);
+        row.appendChild(infoDiv);
+        
+        const removeBtn = document.createElement("button");
+        removeBtn.className = "recent-project-remove";
+        removeBtn.title = "Remove from recent projects";
+        removeBtn.innerHTML = `
+          <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        `;
+        
+        removeBtn.onclick = (e) => {
+          e.stopPropagation();
+          removeRecentProject(proj.path);
+          renderEmptyState();
+        };
+        
+        row.appendChild(removeBtn);
+        
+        row.onclick = () => {
+          openWorkspace(proj.path);
+        };
+        
+        listContainer.appendChild(row);
+      });
+    } else {
+      recentSection.classList.add("hidden");
+      shortcutsSection.classList.remove("hidden");
+    }
+  }
+
   function showEditor(active: boolean) {
     editorHost.classList.toggle("hidden", !active);
     editorEmptyState.classList.toggle("hidden", active);
+    if (!active) {
+      renderEmptyState();
+    }
   }
 
   function scheduleDidChange() {
@@ -136,20 +272,17 @@ async function bootstrap() {
   $("btn-open-folder").onclick = async () => {
     const picked = await openDialog({ directory: true, multiple: false });
     if (!picked || Array.isArray(picked)) return;
-    // Clear any prior diagnostic state up-front; backend will also fire
-    // empty-list events as Pyright restarts but this avoids any flash.
-    diagnostics.clear();
-    editor.setDiagnostics([]);
-    refreshProblems();
-
-    const info = await ipc.workspaceOpen(picked);
-    $("workspace-label").textContent = `${info.name} — ${info.python?.interpreter ?? "no python"}`;
-    await explorer.setRoot(info.root);
-    terminal.log(
-      `Workspace opened: ${info.root}` +
-        (info.python ? ` (python: ${info.python.version ?? "?"})` : "")
-    );
+    await openWorkspace(picked);
   };
+
+  const btnEmptyOpenFolder = $("btn-empty-open-folder");
+  if (btnEmptyOpenFolder) {
+    btnEmptyOpenFolder.onclick = async () => {
+      const picked = await openDialog({ directory: true, multiple: false });
+      if (!picked || Array.isArray(picked)) return;
+      await openWorkspace(picked);
+    };
+  }
 
   $("btn-save").onclick = async () => {
     const active = tabs.active();
@@ -282,9 +415,11 @@ async function bootstrap() {
     }
 
     if (evt.kind === "workspace_closed") {
+      currentWorkspace = null;
       diagnostics.clear();
       editor.setDiagnostics([]);
       refreshProblems();
+      renderEmptyState();
     }
 
     if (evt.kind === "log") {
@@ -402,6 +537,20 @@ async function bootstrap() {
 
   initResizing();
   refreshProblems(); // render empty placeholder
+
+  // Check if a workspace is already open on startup
+  ipc.workspaceInfo().then((info) => {
+    if (info) {
+      currentWorkspace = info;
+      $("workspace-label").textContent = `${info.name} — ${info.python?.interpreter ?? "no python"}`;
+      explorer.setRoot(info.root).catch(() => {});
+      addToRecentProjects(info.root, info.name);
+    }
+    renderEmptyState();
+  }).catch((e) => {
+    console.error("Failed to query initial workspace", e);
+    renderEmptyState();
+  });
 }
 
 bootstrap().catch((err) => {
