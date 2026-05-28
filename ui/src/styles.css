@@ -300,31 +300,33 @@ body.resizing #bottom-content {
   white-space: nowrap;
   color: var(--text-muted);
   font-size: 12.5px;
-  transition: background-color 0.1s ease, color 0.1s ease;
 }
 .file-tree-node:hover {
-  background: rgba(255, 255, 255, 0.04);
+  background: rgba(255, 255, 255, 0.05);
   color: var(--text-main);
 }
 .file-tree-node.selected {
-  background: rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.1);
   color: #ffffff;
 }
-.file-tree-node.workspace-root-node {
+.file-tree-node.scratch-root-node {
   text-transform: uppercase;
   font-weight: 600;
   font-size: 11px;
   letter-spacing: 0.8px;
   color: var(--text-muted);
-  padding-top: 8px;
-  padding-bottom: 8px;
+  padding-top: 6px;
+  padding-bottom: 6px;
+  background: rgba(255, 255, 255, 0.02);
+  border-bottom: 1px solid var(--border-soft);
+  font-style: italic;
 }
-.file-tree-node.workspace-root-node:hover {
-  background: transparent;
+.file-tree-node.scratch-root-node:hover {
+  background: rgba(255, 255, 255, 0.04);
   color: var(--text-main);
 }
-.file-tree-node.workspace-root-node.selected {
-  background: transparent;
+.file-tree-node.scratch-root-node.selected {
+  background: rgba(255, 255, 255, 0.08);
   color: #ffffff;
 }
 .file-tree-node .twisty {
@@ -530,21 +532,19 @@ body.resizing #bottom-content {
   cursor: pointer;
   white-space: nowrap;
   color: var(--text-muted);
-  background: #141416;
-  font-size: 12px;
+  background: var(--bg-tabs);
+  font-size: 12.5px;
   font-weight: 400;
-  transition: all 0.1s ease;
   user-select: none;
 }
 .tab:hover {
-  background: #19191b;
+  background: rgba(255, 255, 255, 0.03);
   color: var(--text-main);
 }
 .tab.active {
   background: var(--bg-editor);
   color: #ffffff;
   border-top: 1px solid var(--accent-color);
-  font-weight: 400;
 }
 
 .tab-label {
@@ -841,8 +841,8 @@ kbd {
   position: absolute;
   top: 0;
   bottom: 0;
-  left: -4px;
-  right: -4px;
+  left: -6px;
+  right: -6px;
   cursor: col-resize;
   z-index: 101;
 }
@@ -856,8 +856,8 @@ kbd {
   position: absolute;
   left: 0;
   right: 0;
-  top: -4px;
-  bottom: -4px;
+  top: -6px;
+  bottom: -6px;
   cursor: row-resize;
   z-index: 101;
 }
@@ -865,7 +865,7 @@ body.resizing .resizer {
   background: var(--accent-color) !important;
 }
 .resizer:hover {
-  background: var(--accent-color);
+  background: rgba(255, 255, 255, 0.2);
 }
 
 /* Footer Bottom Panel Integration */
@@ -893,21 +893,20 @@ body.resizing .resizer {
 .bottom-tab {
   background: transparent;
   border: none;
+  border-bottom: 1px solid transparent;
   color: var(--text-muted);
   padding: 4px 10px;
   cursor: pointer;
   font-size: 11.5px;
   font-weight: 500;
-  border-radius: 4px;
-  transition: all 0.12s ease;
+  transition: color 0.12s ease;
 }
 .bottom-tab:hover {
   color: var(--text-main);
-  background: rgba(255, 255, 255, 0.03);
 }
 .bottom-tab.active {
   color: #ffffff;
-  background: #2b2b2b; /* Pill-style capsule background */
+  border-bottom: 1px solid var(--accent-color);
 }
 
 .bottom-actions {

@@ -171,7 +171,7 @@ export function mountExplorer(host: HTMLElement): ExplorerBinding {
   function buildNode(entry: DirEntry, depth: number): HTMLElement {
     const el = document.createElement("div");
     el.className = "file-tree-node";
-    el.style.paddingLeft = `${6 + depth * 10}px`;
+    el.style.paddingLeft = `${12 + depth * 14}px`;
 
     const twisty = document.createElement("span");
     twisty.className = entry.is_dir ? "twisty folder-twisty" : "twisty";
@@ -475,7 +475,7 @@ export function mountExplorer(host: HTMLElement): ExplorerBinding {
     const wrap = document.createElement("div");
     const row = document.createElement("div");
     row.className = "file-tree-node create-row";
-    row.style.paddingLeft = `${6 + depth * 10}px`;
+    row.style.paddingLeft = `${12 + depth * 14}px`;
 
     const twisty = document.createElement("span");
     twisty.className = "twisty";
@@ -608,7 +608,7 @@ export function mountExplorer(host: HTMLElement): ExplorerBinding {
     }
 
     rootRow.className =
-      "file-tree-node workspace-root-node" +
+      "file-tree-node scratch-root-node" +
       (samePath(scratchSelectedPath ?? scratchSelectedDir ?? "", scratchRoot.path) ? " selected" : "");
     rootRow.style.paddingLeft = "24px"; // align nicely with twisties of children
 
@@ -655,7 +655,7 @@ export function mountExplorer(host: HTMLElement): ExplorerBinding {
       "file-tree-node" +
       (expanded ? " expanded" : "") +
       (isSelected ? " selected" : "");
-    el.style.paddingLeft = `${6 + depth * 10}px`;
+    el.style.paddingLeft = `${12 + depth * 14}px`;
 
     const twisty = document.createElement("span");
     twisty.className = isDir ? "twisty folder-twisty" : "twisty";
