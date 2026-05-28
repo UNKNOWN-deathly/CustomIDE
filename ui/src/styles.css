@@ -79,7 +79,7 @@ body.resizing #bottom-content {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 0 12px;
+  padding: 0 8px;
   background: var(--bg-topbar);
   border-bottom: 1px solid var(--border-color);
   user-select: none;
@@ -104,6 +104,102 @@ body.resizing #bottom-content {
 }
 #topbar button:active {
   background: rgba(255, 255, 255, 0.08);
+}
+.menubar {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  gap: 1px;
+  margin-right: 8px;
+}
+#topbar .menubar-button {
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 3px;
+  color: var(--text-main);
+  font-size: 12px;
+  line-height: 1;
+  transition: none;
+}
+#topbar .menubar-button:hover,
+#topbar .menubar-button.active {
+  background: rgba(255, 255, 255, 0.08);
+  color: #ffffff;
+}
+.ide-menu {
+  position: fixed;
+  z-index: 1500;
+  min-width: 245px;
+  max-width: min(420px, calc(100vw - 8px));
+  padding: 4px 0;
+  background: #252526;
+  border: 1px solid #3c3c3c;
+  border-radius: 3px;
+  box-shadow: 0 7px 18px rgba(0, 0, 0, 0.38);
+  color: var(--text-main);
+  user-select: none;
+}
+.ide-menu-item {
+  appearance: none;
+  width: 100%;
+  height: 24px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 12px;
+  align-items: center;
+  gap: 12px;
+  padding: 0 8px 0 22px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  color: var(--text-main);
+  cursor: default;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  white-space: nowrap;
+}
+.ide-menu-item:hover,
+.ide-menu-item.active {
+  background: #094771;
+  color: #ffffff;
+}
+.ide-menu-item:disabled {
+  color: #737373;
+}
+.ide-menu-item:disabled:hover,
+.ide-menu-item:disabled.active {
+  background: transparent;
+  color: #737373;
+}
+.ide-menu-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ide-menu-shortcut {
+  color: var(--text-muted);
+  font-family: var(--font-stack);
+  font-size: 11px;
+  justify-self: end;
+}
+.ide-menu-item:hover .ide-menu-shortcut,
+.ide-menu-item.active .ide-menu-shortcut {
+  color: rgba(255, 255, 255, 0.82);
+}
+.ide-menu-item:disabled .ide-menu-shortcut,
+.ide-menu-item:disabled:hover .ide-menu-shortcut,
+.ide-menu-item:disabled.active .ide-menu-shortcut {
+  color: #626262;
+}
+.ide-menu-submenu-arrow {
+  justify-self: end;
+  color: inherit;
+  font-size: 15px;
+  line-height: 1;
+}
+.ide-menu-separator {
+  height: 1px;
+  margin: 4px 0;
+  background: #343434;
 }
 #workspace-label {
   color: var(--text-muted);

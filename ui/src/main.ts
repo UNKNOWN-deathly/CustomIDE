@@ -17,6 +17,8 @@ import {
   suppressRunPrompt,
   type RunTargetSuggestion,
 } from "./runTarget";
+import { CommandRegistry, registerDisabledCommand } from "./commands";
+import { menuCommand, menuSeparator, menuSubmenu, mountMenus, type MenuItem } from "./menus";
 
 const $ = <T extends HTMLElement>(id: string) =>
   document.getElementById(id) as T;
@@ -94,6 +96,7 @@ async function bootstrap() {
     if (termEl) termEl.style.zoom = zoomLevel !== 1 ? String(1 / zoomLevel) : "";
     terminal.setZoom(zoomLevel);
     localStorage.setItem(ZOOM_KEY, zoomLevel.toFixed(2));
+    window.dispatchEvent(new CustomEvent("ide:zoomchange"));
   }
 
   // Apply persisted zoom synchronously — happens before first paint, no flicker.
@@ -874,6 +877,60 @@ async function bootstrap() {
     return true;
   }
 
+  async function saveActiveAs(): Promise<boolean> {
+    const active = tabs.active();
+    if (!active && scratchWorkspace) {
+      return saveScratchWorkspace();
+    }
+    if (!active) return false;
+    if (scratchWorkspace && findScratchFile(active.path)) {
+      return saveScratchWorkspace();
+    }
+
+    const defaultPath = currentWorkspace && isTemporaryPath(active.path)
+      ? joinPath(currentWorkspace.root, active.name)
+      : isTemporaryPath(active.path)
+        ? active.name
+        : active.path;
+    const picked = await saveDialog({
+      defaultPath,
+      filters: [
+        { name: "Python", extensions: ["py", "pyi"] },
+        { name: "All Files", extensions: ["*"] },
+      ],
+    });
+    if (!picked) return false;
+
+    const contents = editor.getDoc();
+    try {
+      await tabs.relocate(active.path, picked, contents);
+    } catch (e) {
+      terminal.log(`save as failed: ${String(e)}`);
+      return false;
+    }
+    if (/\.pyi?$/i.test(picked)) {
+      ipc.docDidOpen(picked, contents).catch(() => {});
+      ipc.docDidSave(picked, contents).catch(() => {});
+    }
+    persistWorkspaceTabState().catch(() => {});
+    return true;
+  }
+
+  async function saveAllDirtyTabs(): Promise<boolean> {
+    syncActiveScratchFile();
+    tabs.updateActiveContent(editor.getDoc());
+    const dirtyTabs = tabs.all().filter((tab) => tab.dirty);
+    if (scratchWorkspace) {
+      return saveScratchWorkspace();
+    }
+    for (const tab of dirtyTabs) {
+      tabs.setActive(tab.path);
+      const ok = await saveActiveWithDialog();
+      if (!ok) return false;
+    }
+    return true;
+  }
+
   // Walks every dirty tab, prompting once per tab. Returns false if user
   // cancels at any step. Used by workspace switch and window close.
   async function confirmDiscardAllUnsaved(reason: string): Promise<boolean> {
@@ -915,6 +972,208 @@ async function bootstrap() {
     }
     return true;
   }
+
+  async function openFolderWithDialog() {
+    const picked = await openDialog({ directory: true, multiple: false });
+    if (!picked || Array.isArray(picked)) return;
+    await openWorkspace(picked);
+  }
+
+  async function openFileWithDialog() {
+    const picked = await openDialog({
+      directory: false,
+      multiple: false,
+      filters: [
+        { name: "Python", extensions: ["py", "pyi"] },
+        { name: "All Files", extensions: ["*"] },
+      ],
+    });
+    if (!picked || Array.isArray(picked)) return;
+    try {
+      await tabs.open(picked);
+    } catch (e) {
+      terminal.log(`open file failed: ${String(e)}`);
+    }
+  }
+
+  async function newFileCommand() {
+    if (currentWorkspace || scratchWorkspace) {
+      await explorer.beginCreate("file");
+      return;
+    }
+    await createFileFromEmptyState();
+  }
+
+  async function newFolderCommand() {
+    if (currentWorkspace || scratchWorkspace) {
+      await explorer.beginCreate("folder");
+      return;
+    }
+    await createFolderFromEmptyState();
+  }
+
+  let handlingCloseRequest = false;
+
+  async function closeWindowWithConfirm(): Promise<void> {
+    if (handlingCloseRequest) return;
+    handlingCloseRequest = true;
+    try {
+      if (!hasUnsavedWork() || await confirmDiscardAllUnsaved("The IDE is closing.")) {
+        await getCurrentWindow().destroy();
+      }
+    } catch (e) {
+      console.error("Could not close window", e);
+    } finally {
+      handlingCloseRequest = false;
+    }
+  }
+
+  const commands = new CommandRegistry();
+  const commandContext = {
+    log: (message: string) => terminal.log(message),
+  };
+
+  commands.register({
+    id: "file.newTextFile",
+    label: "New Text File",
+    shortcut: "Ctrl+N",
+    run: () => {
+      tabs.openUntitled();
+    },
+  });
+  commands.register({
+    id: "file.newFile",
+    label: "New File...",
+    run: () => newFileCommand(),
+  });
+  commands.register({
+    id: "file.newFolder",
+    label: "New Folder...",
+    run: () => newFolderCommand(),
+  });
+  registerDisabledCommand(commands, "file.newWindow", "New Window", commandContext);
+  commands.register({
+    id: "file.openFile",
+    label: "Open File...",
+    shortcut: "Ctrl+O",
+    run: () => openFileWithDialog(),
+  });
+  commands.register({
+    id: "file.openFolder",
+    label: "Open Folder...",
+    shortcut: "Ctrl+K Ctrl+O",
+    run: () => openFolderWithDialog(),
+  });
+  registerDisabledCommand(commands, "file.openWorkspaceFile", "Open Workspace from File...", commandContext);
+  registerDisabledCommand(commands, "file.addFolderToWorkspace", "Add Folder to Workspace...", commandContext);
+  registerDisabledCommand(commands, "file.saveWorkspaceAs", "Save Workspace As...", commandContext);
+  registerDisabledCommand(commands, "file.duplicateWorkspace", "Duplicate Workspace", commandContext);
+  commands.register({
+    id: "file.save",
+    label: "Save",
+    shortcut: "Ctrl+S",
+    enabled: () => Boolean(tabs.active() || scratchWorkspace),
+    run: () => saveActiveWithDialog(),
+  });
+  commands.register({
+    id: "file.saveAs",
+    label: "Save As...",
+    shortcut: "Ctrl+Shift+S",
+    enabled: () => Boolean(tabs.active() || scratchWorkspace),
+    run: () => saveActiveAs(),
+  });
+  commands.register({
+    id: "file.saveAll",
+    label: "Save All",
+    shortcut: "Ctrl+K S",
+    enabled: () => hasUnsavedWork(),
+    run: () => saveAllDirtyTabs(),
+  });
+  registerDisabledCommand(commands, "file.autoSave", "Auto Save", commandContext);
+  registerDisabledCommand(commands, "file.preferences", "Preferences", commandContext);
+  registerDisabledCommand(commands, "file.revertFile", "Revert File", commandContext);
+  commands.register({
+    id: "file.closeEditor",
+    label: "Close Editor",
+    shortcut: "Ctrl+W",
+    enabled: () => Boolean(tabs.active()),
+    run: async () => {
+      const active = tabs.active();
+      if (active) await closeTabWithConfirm(active.path);
+    },
+  });
+  registerDisabledCommand(commands, "file.closeFolder", "Close Folder", commandContext);
+  commands.register({
+    id: "file.closeWindow",
+    label: "Close Window",
+    shortcut: "Alt+F4",
+    run: () => closeWindowWithConfirm(),
+  });
+  commands.register({
+    id: "file.exit",
+    label: "Exit",
+    run: () => closeWindowWithConfirm(),
+  });
+
+  function recentProjectItems(): MenuItem[] {
+    if (recentProjects.length === 0) {
+      return [{ kind: "command", command: "file.openRecent.empty" }];
+    }
+    return recentProjects.map((project, index) => {
+      const id = `file.openRecent.${index}`;
+      if (!commands.get(id)) {
+        commands.register({
+          id,
+          label: project.name,
+          run: () => openWorkspace(project.path, true),
+        });
+      }
+      const command = commands.get(id);
+      if (command) {
+        command.label = project.name;
+        command.run = () => openWorkspace(project.path, true);
+      }
+      return { kind: "command", command: id };
+    });
+  }
+
+  registerDisabledCommand(commands, "file.openRecent.empty", "No Recent Folders", commandContext);
+
+  mountMenus($("menubar"), commands, [
+    {
+      id: "file",
+      label: "File",
+      items: () => [
+        menuCommand("file.newTextFile"),
+        menuCommand("file.newFile"),
+        menuCommand("file.newFolder"),
+        menuCommand("file.newWindow"),
+        menuSeparator(),
+        menuCommand("file.openFile"),
+        menuCommand("file.openFolder"),
+        menuCommand("file.openWorkspaceFile"),
+        menuSubmenu("file.openRecent", "Open Recent", recentProjectItems),
+        menuSeparator(),
+        menuCommand("file.addFolderToWorkspace"),
+        menuCommand("file.saveWorkspaceAs"),
+        menuCommand("file.duplicateWorkspace"),
+        menuSeparator(),
+        menuCommand("file.save"),
+        menuCommand("file.saveAs"),
+        menuCommand("file.saveAll"),
+        menuCommand("file.autoSave"),
+        menuSeparator(),
+        menuCommand("file.preferences"),
+        menuSeparator(),
+        menuCommand("file.revertFile"),
+        menuCommand("file.closeEditor"),
+        menuCommand("file.closeFolder"),
+        menuCommand("file.closeWindow"),
+        menuSeparator(),
+        menuCommand("file.exit"),
+      ],
+    },
+  ]);
 
   explorer.onOpenFile((path) => {
     if (isTemporaryPath(path)) {
@@ -971,21 +1230,13 @@ async function bootstrap() {
   const btnNewFile = document.getElementById("btn-new-file");
   if (btnNewFile) {
     btnNewFile.onclick = () => {
-      if (currentWorkspace || scratchWorkspace) {
-        explorer.beginCreate("file").catch(() => {});
-        return;
-      }
-      createFileFromEmptyState().catch((e) => terminal.log(`new file failed: ${String(e)}`));
+      commands.execute("file.newFile").catch((e) => terminal.log(`new file failed: ${String(e)}`));
     };
   }
   const btnNewFolder = document.getElementById("btn-new-folder");
   if (btnNewFolder) {
     btnNewFolder.onclick = () => {
-      if (currentWorkspace || scratchWorkspace) {
-        explorer.beginCreate("folder").catch(() => {});
-        return;
-      }
-      createFolderFromEmptyState().catch((e) => terminal.log(`new folder failed: ${String(e)}`));
+      commands.execute("file.newFolder").catch((e) => terminal.log(`new folder failed: ${String(e)}`));
     };
   }
 
@@ -995,46 +1246,29 @@ async function bootstrap() {
     showBottom("terminal", false); // hide problems so the editor jump is visible
   });
 
-  // Top bar wiring
-  $("btn-open-folder").onclick = async () => {
-    const picked = await openDialog({ directory: true, multiple: false });
-    if (!picked || Array.isArray(picked)) return;
-    await openWorkspace(picked);
-  };
-
   const btnEmptyOpenFolder = $("btn-empty-open-folder");
   if (btnEmptyOpenFolder) {
     btnEmptyOpenFolder.onclick = async () => {
-      const picked = await openDialog({ directory: true, multiple: false });
-      if (!picked || Array.isArray(picked)) return;
-      await openWorkspace(picked);
+      await commands.execute("file.openFolder");
     };
   }
 
   const btnEmptyNewFile = $("btn-empty-new-file");
   if (btnEmptyNewFile) {
     btnEmptyNewFile.onclick = () => {
-      if (currentWorkspace || scratchWorkspace) {
-        explorer.beginCreate("file").catch(() => {});
-        return;
-      }
-      createFileFromEmptyState().catch((e) => terminal.log(`new file failed: ${String(e)}`));
+      commands.execute("file.newFile").catch((e) => terminal.log(`new file failed: ${String(e)}`));
     };
   }
 
   const btnEmptyNewFolder = $("btn-empty-new-folder");
   if (btnEmptyNewFolder) {
     btnEmptyNewFolder.onclick = () => {
-      if (currentWorkspace || scratchWorkspace) {
-        explorer.beginCreate("folder").catch(() => {});
-        return;
-      }
-      createFolderFromEmptyState().catch((e) => terminal.log(`new folder failed: ${String(e)}`));
+      commands.execute("file.newFolder").catch((e) => terminal.log(`new folder failed: ${String(e)}`));
     };
   }
 
   $("btn-save").onclick = async () => {
-    await saveActiveWithDialog();
+    await commands.execute("file.save");
   };
 
   const btnClearTerminal = $("btn-clear-terminal");
@@ -1236,18 +1470,19 @@ async function bootstrap() {
     const mod = e.ctrlKey || e.metaKey;
     if (mod && e.key.toLowerCase() === "s") {
       e.preventDefault();
-      $("btn-save").click();
+      commands.execute(e.shiftKey ? "file.saveAs" : "file.save").catch(() => {});
     }
     if (mod && e.key.toLowerCase() === "n") {
       e.preventDefault();
-      createFileFromEmptyState().catch((err) => terminal.log(`new file failed: ${String(err)}`));
+      commands.execute("file.newTextFile").catch((err) => terminal.log(`new file failed: ${String(err)}`));
+    }
+    if (mod && e.key.toLowerCase() === "o") {
+      e.preventDefault();
+      commands.execute("file.openFile").catch((err) => terminal.log(`open file failed: ${String(err)}`));
     }
     if (mod && e.key.toLowerCase() === "w") {
-      const active = tabs.active();
-      if (active) {
-        e.preventDefault();
-        closeTabWithConfirm(active.path).catch(() => {});
-      }
+      e.preventDefault();
+      commands.execute("file.closeEditor").catch(() => {});
     }
   });
 
@@ -1367,28 +1602,10 @@ async function bootstrap() {
   // ready to close.
   try {
     const appWindow = getCurrentWindow();
-    let handling = false;
-    const destroyWindow = async () => {
-      try {
-        await appWindow.destroy();
-      } catch (e) {
-        console.error("Could not destroy window after close request", e);
-      }
-    };
     await appWindow.onCloseRequested(async (event) => {
       // Always take control; we'll call destroy() when it's safe to close.
       event.preventDefault();
-      if (handling) return; // re-entrant guard (shouldn't happen with destroy())
-      if (!hasUnsavedWork()) {
-        await destroyWindow();
-        return;
-      }
-      handling = true;
-      const ok = await confirmDiscardAllUnsaved("The IDE is closing.");
-      handling = false;
-      if (ok) {
-        await destroyWindow();
-      }
+      await closeWindowWithConfirm();
     });
   } catch (e) {
     console.error("Could not attach close handler", e);
