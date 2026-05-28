@@ -30,12 +30,6 @@ export interface TerminalBinding {
   onResize(handler: (cols: number, rows: number) => void): void;
   isFocused(): boolean;
   onFocusChange(handler: (focused: boolean) => void): void;
-  /**
-   * Follow the IDE-wide zoom level. The terminal container is counter-zoomed
-   * in CSS so xterm always renders at native pixel scale; we drive size here
-   * by changing the font size and refitting cells.
-   */
-  setZoom(zoom: number): void;
 }
 
 export function mountTerminal(host: HTMLElement): TerminalBinding {
@@ -254,30 +248,6 @@ export function mountTerminal(host: HTMLElement): TerminalBinding {
     },
     onFocusChange(handler) {
       focusHandler = handler;
-    },
-    setZoom(zoom) {
-      // Clamp matches main.ts's applyZoom bounds; keep ints so xterm's cell
-      // metrics quantise predictably.
-      const clamped = Math.max(0.8, Math.min(zoom, 1.5));
-      const newSize = Math.max(8, Math.round(BASE_FONT_SIZE * clamped));
-      if (term.options.fontSize === newSize) {
-        // Even if size is unchanged, the surrounding container may have
-        // resized (e.g. due to other zoom-driven layout shifts) — refit so
-        // cols/rows stay in sync.
-        requestAnimationFrame(() => safeFit());
-        return;
-      }
-      term.options.fontSize = newSize;
-      // Force xterm to remeasure cells against the new font, then resize the
-      // grid to the (counter-zoomed, native-pixel) container.
-      requestAnimationFrame(() => {
-        safeFit();
-        try {
-          term.refresh(0, Math.max(0, term.rows - 1));
-        } catch {
-          /* terminal not attached yet */
-        }
-      });
     },
   };
 }

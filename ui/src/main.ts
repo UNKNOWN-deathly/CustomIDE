@@ -3,6 +3,7 @@
 
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 
 import { ipc, onCoreEvent, type CoreDiagnostic, type CoreEvent, type RecentProject, type WorkspaceInfo } from "./ipc";
 import { mountEditor } from "./editor";
@@ -83,24 +84,33 @@ async function bootstrap() {
     return Number.isFinite(v) ? Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, v)) : 1;
   })();
 
-  function applyZoom(z: number): void {
+  async function applyZoom(z: number): Promise<void> {
     zoomLevel = Math.round(Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, z)) * 100) / 100;
-    // Scale the whole IDE via CSS zoom on the root element.
-    document.documentElement.style.zoom = String(zoomLevel);
-    // Compensate #app's height so it still fills exactly one viewport after zoom.
-    const appEl = document.getElementById("app")!;
-    appEl.style.height = zoomLevel !== 1 ? `${(100 / zoomLevel).toFixed(4)}vh` : "";
-    // Counter-zoom the xterm host so xterm renders at native pixel density.
-    // terminal.setZoom() then scales the font size to match the visual zoom level.
-    const termEl = document.getElementById("terminal");
-    if (termEl) termEl.style.zoom = zoomLevel !== 1 ? String(1 / zoomLevel) : "";
-    terminal.setZoom(zoomLevel);
+    // Native WebView zoom: the OS renderer scales the entire coordinate system,
+    // so layout geometry, fonts, overlays, and panels all scale coherently.
+    await getCurrentWebview().setZoom(zoomLevel);
     localStorage.setItem(ZOOM_KEY, zoomLevel.toFixed(2));
     window.dispatchEvent(new CustomEvent("ide:zoomchange"));
   }
 
-  // Apply persisted zoom synchronously — happens before first paint, no flicker.
+  // Apply persisted zoom at startup. The IPC round-trip completes before the
+  // user's first interaction; fire-and-forget is intentional here.
   applyZoom(zoomLevel);
+
+  // Welcome-screen zoom tier. Native WebView zoom doesn't change CSS pixel
+  // dimensions, so @container queries can't see it — we derive a tier from
+  // zoomLevel directly and reflect it on <body> for CSS to key off.
+  // Container queries still handle sidebar/panel/window resize separately.
+  function updateWelcomeZoomTier() {
+    let tier: "wide" | "medium" | "small" | "very-small";
+    if      (zoomLevel >= 1.5) tier = "very-small";
+    else if (zoomLevel >= 1.4) tier = "small";
+    else if (zoomLevel >= 1.25) tier = "medium";
+    else                       tier = "wide";
+    document.body.dataset.welcomeZoomTier = tier;
+  }
+  updateWelcomeZoomTier();
+  window.addEventListener("ide:zoomchange", updateWelcomeZoomTier);
 
   let currentWorkspace: WorkspaceInfo | null = null;
   let recentProjects: RecentProject[] = [];

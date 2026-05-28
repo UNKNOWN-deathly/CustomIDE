@@ -24,6 +24,18 @@
   
   --font-stack: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --font-mono: "Fira Code", "JetBrains Mono", Consolas, Menlo, Monaco, "Courier New", monospace;
+
+  --ide-zoom: 1;
+  --welcome-width: 620px;
+  --welcome-min-width: 360px;
+  --welcome-action-min: 160px;
+  --welcome-gap: clamp(10px, 2vh, 16px);
+  --welcome-small-gap: 8px;
+  --welcome-pad-block: clamp(12px, 3.5vh, 28px);
+  --welcome-pad-inline: clamp(16px, 4vw, 48px);
+  --welcome-section-pad: 16px;
+  --welcome-subtitle-width: 460px;
+  --welcome-recent-height: min(180px, 25vh);
 }
 
 * { box-sizing: border-box; }
@@ -61,8 +73,10 @@ html, body, #app {
 /* App Grid Structure with Resizers & Statusbar */
 #app {
   display: grid;
-  grid-template-rows: 35px 1fr 1px 220px 22px;
+  grid-template-rows: 35px minmax(0, 1fr) 1px 220px 22px;
   height: 100vh;
+  min-height: 0;
+  min-width: 0;
 }
 
 body.resizing * {
@@ -271,16 +285,18 @@ body.resizing #bottom-content {
 /* Main Body Layout */
 #body {
   display: grid;
-  grid-template-columns: 260px 1px 1fr;
+  grid-template-columns: 260px 1px minmax(0, 1fr);
   min-height: 0;
+  min-width: 0;
 }
 
 #sidebar {
   display: grid;
-  grid-template-columns: 48px 1fr;
+  grid-template-columns: 48px minmax(0, 1fr);
   background: var(--bg-sidebar);
   border-right: 1px solid var(--border-color);
   min-height: 0;
+  min-width: 0;
 }
 
 /* Activity Rail with Clean Outline SVGs and left border-active accent */
@@ -327,6 +343,8 @@ body.resizing #bottom-content {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  min-width: 0;
+  min-height: 0;
 }
 .sidebar-view {
   display: flex;
@@ -600,7 +618,7 @@ body.resizing #bottom-content {
 /* Center Panel (Tabs + Editor) */
 #center {
   display: grid;
-  grid-template-rows: 35px 1fr;
+  grid-template-rows: 35px minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
 }
@@ -705,6 +723,7 @@ body.resizing #bottom-content {
 #editor-shell {
   position: relative;
   min-height: 0;
+  min-width: 0;
   overflow: hidden;
   background: var(--bg-editor);
 }
@@ -719,39 +738,52 @@ body.resizing #bottom-content {
   color: var(--text-muted);
   user-select: none;
   background: var(--bg-editor);
+  padding: var(--welcome-pad-block) var(--welcome-pad-inline);
+  overflow: auto;
+  /* Size containment so queries can react to BOTH width and height of the
+     editor viewport — needed because zoom, sidebar resize, and bottom-panel
+     resize each constrain a different axis. */
+  container-type: size;
+  container-name: welcome;
 }
 .empty-state-container {
-  max-width: 380px;
+  margin-block: auto;
+  width: min(100%, var(--welcome-width));
+  min-width: min(var(--welcome-min-width), 100%);
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 16px;
+  gap: var(--welcome-gap);
 }
 .empty-state-logo {
   color: var(--text-dark);
-  margin-bottom: 4px;
+  margin-bottom: 2px;
+  flex-shrink: 0;
 }
 .empty-state-logo svg {
   color: #3a3a3d;
+  width: 80px;
+  height: 80px;
 }
 #editor-empty-state h1 {
   margin: 0;
   color: #ffffff;
   font-size: 20px;
   font-weight: 500;
-  letter-spacing: -0.3px;
+  letter-spacing: 0;
 }
 .empty-state-subtitle {
-  margin: -8px 0 16px 0;
+  margin: -6px 0 var(--welcome-section-pad) 0;
   font-size: 12px;
   line-height: 1.5;
   color: var(--text-muted);
+  max-width: var(--welcome-subtitle-width);
 }
 .empty-quick-actions {
   width: 100%;
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(min(var(--welcome-action-min), 100%), 1fr));
+  gap: var(--welcome-small-gap);
 }
 .empty-action-btn {
   background: #202022;
@@ -779,18 +811,26 @@ body.resizing #bottom-content {
   width: 100%;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--welcome-small-gap);
   border-top: 1px solid var(--border-color);
-  padding-top: 16px;
+  padding-top: var(--welcome-section-pad);
 }
 .shortcut-row {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 18px;
   font-size: 11.5px;
 }
 .shortcut-label {
   color: var(--text-muted);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.shortcut-key {
+  flex-shrink: 0;
 }
 kbd {
   background-color: #252526;
@@ -810,9 +850,9 @@ kbd {
   width: 100%;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--welcome-small-gap);
   border-top: 1px solid var(--border-color);
-  padding-top: 16px;
+  padding-top: var(--welcome-section-pad);
   text-align: left;
 }
 .recent-title {
@@ -826,8 +866,8 @@ kbd {
 .recent-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  max-height: 180px;
+  gap: var(--welcome-small-gap);
+  max-height: var(--welcome-recent-height);
   overflow-y: auto;
   padding-right: 4px;
 }
@@ -841,6 +881,7 @@ kbd {
   background: rgba(255, 255, 255, 0.01);
   border: 1px solid var(--border-color);
   transition: all 0.12s ease;
+  min-width: 0;
 }
 .recent-project-row:hover {
   background: rgba(255, 255, 255, 0.03);
@@ -913,6 +954,165 @@ kbd {
 }
 
 #editor-empty-state.hidden { display: none; }
+#recent-projects-section.hidden { display: none; }
+.empty-state-shortcuts.hidden { display: none; }
+
+/* ─────────────────────────────────────────────────────────────────────
+   Welcome-screen progressive simplification.
+   Driven by container size (the editor viewport), not the window —
+   adapts under native zoom and under sidebar/bottom resizes alike.
+
+   Priority order (kept longest → dropped first):
+     1. Primary actions (New File / New Folder)
+     2. Recent projects
+     3. Shortcuts/help section
+     4. Subtitle, logo, title chrome
+   ───────────────────────────────────────────────────────────────────── */
+
+/* Medium — drop shortcuts; keep recents + actions + branding.
+   Triggered either by container size (panel/window resize)
+   OR by zoom tier set on <body> via JS (since native zoom does not
+   change CSS pixel dimensions and thus can't be detected by @container). */
+@container welcome (max-width: 540px), @container welcome (max-height: 380px) {
+  .empty-state-shortcuts { display: none; }
+}
+body[data-welcome-zoom-tier="medium"] .empty-state-shortcuts,
+body[data-welcome-zoom-tier="small"] .empty-state-shortcuts,
+body[data-welcome-zoom-tier="very-small"] .empty-state-shortcuts { display: none; }
+
+/* Small — drop recents too. */
+@container welcome (max-width: 360px), @container welcome (max-height: 280px) {
+  #recent-projects-section { display: none; }
+}
+body[data-welcome-zoom-tier="small"] #recent-projects-section,
+body[data-welcome-zoom-tier="very-small"] #recent-projects-section { display: none; }
+
+/* Very small — ultra-compact: hide subtitle, shrink logo, stack actions. */
+@container welcome (max-width: 280px), @container welcome (max-height: 220px) {
+  .empty-state-subtitle { display: none; }
+  .empty-state-logo { display: none; }
+  #editor-empty-state {
+    padding: 10px 12px;
+    align-items: flex-start;
+  }
+  .empty-state-container {
+    gap: 8px;
+  }
+  #editor-empty-state h1 {
+    font-size: 15px;
+  }
+  .empty-quick-actions {
+    grid-template-columns: 1fr;
+    gap: 5px;
+  }
+  .empty-action-btn {
+    padding: 7px 9px;
+    width: 100%;
+  }
+}
+body[data-welcome-zoom-tier="very-small"] .empty-state-subtitle,
+body[data-welcome-zoom-tier="very-small"] .empty-state-logo { display: none; }
+body[data-welcome-zoom-tier="very-small"] #editor-empty-state {
+  padding: 10px 12px;
+  align-items: flex-start;
+}
+body[data-welcome-zoom-tier="very-small"] .empty-state-container { gap: 8px; }
+body[data-welcome-zoom-tier="very-small"] #editor-empty-state h1 { font-size: 15px; }
+body[data-welcome-zoom-tier="very-small"] .empty-quick-actions {
+  grid-template-columns: 1fr;
+  gap: 5px;
+}
+body[data-welcome-zoom-tier="very-small"] .empty-action-btn {
+  padding: 7px 9px;
+  width: 100%;
+}
+
+/* Medium: tighter spacing, smaller action minimum, smaller cards. */
+@container welcome (max-width: 560px) {
+  .empty-state-container {
+    gap: 10px;
+  }
+  .empty-state-logo svg {
+    width: 64px;
+    height: 64px;
+  }
+  #editor-empty-state h1 {
+    font-size: 18px;
+  }
+  .empty-state-subtitle {
+    margin-bottom: 10px;
+  }
+  .empty-quick-actions {
+    grid-template-columns: repeat(auto-fit, minmax(min(140px, 100%), 1fr));
+    gap: 6px;
+  }
+  .empty-state-recent,
+  .empty-state-shortcuts {
+    padding-top: 12px;
+    gap: 6px;
+  }
+  .recent-project-row {
+    padding: 5px 8px;
+  }
+}
+
+/* Compact: stacked actions, compact cards, minimal padding. */
+@container welcome (max-width: 380px) {
+  #editor-empty-state {
+    padding: 12px 14px;
+    align-items: flex-start;
+  }
+  .empty-state-container {
+    gap: 8px;
+  }
+  .empty-state-logo svg {
+    width: 48px;
+    height: 48px;
+  }
+  #editor-empty-state h1 {
+    font-size: 16px;
+  }
+  .empty-state-subtitle {
+    font-size: 11.5px;
+    margin-bottom: 8px;
+  }
+  .empty-quick-actions {
+    grid-template-columns: 1fr;       /* stack vertically */
+    gap: 6px;
+  }
+  .empty-action-btn {
+    padding: 8px 10px;
+    width: 100%;
+  }
+  .empty-state-recent,
+  .empty-state-shortcuts {
+    padding-top: 10px;
+    gap: 5px;
+  }
+  .recent-title {
+    font-size: 10px;
+  }
+  .recent-project-row {
+    padding: 5px 7px;
+    gap: 6px;
+  }
+  .recent-project-name {
+    font-size: 11.5px;
+  }
+  .recent-project-path {
+    font-size: 10.5px;
+  }
+  .recent-open-btn {
+    padding: 6px 8px;
+    font-size: 11px;
+  }
+  .shortcut-row {
+    flex-direction: column;          /* stack label above key */
+    align-items: flex-start;
+    gap: 2px;
+    font-size: 11px;
+  }
+}
 
 #editor { overflow: hidden; min-height: 0; height: 100%; }
 #editor.hidden { display: none; }
