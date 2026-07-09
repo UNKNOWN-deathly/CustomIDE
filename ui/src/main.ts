@@ -10,7 +10,7 @@ import { ipc, onCoreEvent, type CoreDiagnostic, type CoreEvent, type RecentProje
 import { mountEditor } from "./editor";
 import { mountTabs, isTemporaryPath, type Tab } from "./tabs";
 import { mountExplorer, type ScratchEntry, type ScratchFile, type ScratchFolder } from "./explorer";
-import { confirmSave, promptName, type SaveDecision } from "./modal";
+import { confirmSave, confirmDialog, promptName, type SaveDecision } from "./modal";
 import { mountTerminal } from "./terminal";
 import { mountProblems, type ProblemEntry } from "./problems";
 import {
@@ -124,6 +124,8 @@ async function bootstrap() {
   /** Active frictionless-run snapshot at ~/Documents/run_temp_, if any. */
   let activeRunTempDir: string | null = null;
   const RUN_TEMP_DIR_NAME = "run_temp_";
+  /** Skip sending buffers larger than this (chars) to Pyright — huge docs stall the LSP. */
+  const PYRIGHT_MAX_DOC_CHARS = 1_000_000;
 
   function sleep(ms: number) {
     return new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -772,15 +774,45 @@ async function bootstrap() {
         ...openFiles.filter((path) => !activeFile || normPath(path) !== normPath(activeFile)),
         ...(activeFile ? [activeFile] : []),
       ]);
-      for (const path of orderedFiles) {
-        try {
-          await tabs.open(path);
-        } catch (e) {
-          terminal.log(`Could not restore tab ${path}: ${String(e)}`);
+
+      // Read every restored file in parallel and insert the tabs without
+      // activating/persisting per file. Opening them one-by-one previously did
+      // N sequential reads + N editor swaps + ~2N settings writes, which is the
+      // lag when reopening a recent project.
+      const loaded = await Promise.all(
+        orderedFiles.map(async (path) => {
+          try {
+            return { path, content: await ipc.fsRead(path) };
+          } catch (e) {
+            terminal.log(`Could not restore tab ${path}: ${String(e)}`, { newPrompt: true });
+            return null;
+          }
+        })
+      );
+
+      for (const item of loaded) {
+        if (!item) continue;
+        tabs.addBackground(item.path, basename(item.path), item.content);
+        if (
+          !isTemporaryPath(item.path) &&
+          /\.pyi?$/i.test(item.path) &&
+          item.content.length <= PYRIGHT_MAX_DOC_CHARS
+        ) {
+          ipc.docDidOpen(item.path, item.content).catch(() => {});
         }
+
       }
+      tabs.render();
+
+      // Activate the previously-active file once (or the first that loaded).
+      const activeLoaded =
+        activeFile && loaded.some((i) => i && normPath(i.path) === normPath(activeFile));
+      const finalActive = activeLoaded
+        ? activeFile
+        : loaded.find((i) => i)?.path ?? null;
+      if (finalActive) tabs.setActive(finalActive);
     } catch (e) {
-      terminal.log(`Could not restore workspace tabs: ${String(e)}`);
+      terminal.log(`Could not restore workspace tabs: ${String(e)}`, { newPrompt: true });
     }
   }
 
@@ -941,7 +973,9 @@ async function bootstrap() {
     changeTimer = window.setTimeout(() => {
       const cur = tabs.active();
       if (!cur || isTemporaryPath(cur.path)) return;
-      ipc.docDidChange(cur.path, editor.getDoc()).catch(() => {});
+      const doc = editor.getDoc();
+      if (doc.length > PYRIGHT_MAX_DOC_CHARS) return;
+      ipc.docDidChange(cur.path, doc).catch(() => {});
     }, 250);
   }
 
@@ -1005,7 +1039,7 @@ async function bootstrap() {
     await baseOpen(path);
     if (isNew && !isTemporaryPath(path) && /\.pyi?$/i.test(path)) {
       const cur = tabs.active();
-      if (cur && cur.path === path) {
+      if (cur && cur.path === path && cur.content.length <= PYRIGHT_MAX_DOC_CHARS) {
         ipc.docDidOpen(path, cur.content).catch(() => {});
       }
     }
@@ -1419,7 +1453,29 @@ async function bootstrap() {
       openScratchFile(path);
       return;
     }
-    tabs.open(path);
+    // Surface open failures instead of silently doing nothing (which reads as
+    // "lag" or a broken click). For non-text files, offer to open anyway in the
+    // built-in text editor, like most editors do.
+    tabs.open(path).catch(async (e) => {
+      if (!String(e).includes("not a text file")) {
+        terminal.log(`open failed: ${String(e)}`, { newPrompt: true });
+        return;
+      }
+      const name = basename(path);
+      const openAnyway = await confirmDialog({
+        title: "Can't open this file",
+        message: `${name} is not a readable text format. Do you want to open it in the built-in text editor anyway?`,
+        confirmLabel: "Open Anyway",
+        cancelLabel: "Cancel",
+      });
+      if (!openAnyway) return;
+      try {
+        const content = await ipc.fsReadLossy(path);
+        tabs.openWithContent(path, name, content);
+      } catch (e2) {
+        terminal.log(`open failed: ${String(e2)}`, { newPrompt: true });
+      }
+    });
   });
   explorer.onFileCreated((path) => {
     if (isTemporaryPath(path)) {

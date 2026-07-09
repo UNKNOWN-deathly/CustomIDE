@@ -651,6 +651,12 @@ body.resizing #bottom-content {
   font-weight: 400;
   user-select: none;
 }
+
+#tabs.multi-tab .tab {
+  flex: 0 0 145px;
+  width: 145px;
+}
+
 .tab:hover {
   background: rgba(255, 255, 255, 0.03);
   color: var(--text-main);
@@ -666,6 +672,15 @@ body.resizing #bottom-content {
   display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
+
+.tab-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .tab-indicator {

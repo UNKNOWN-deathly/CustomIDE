@@ -309,7 +309,8 @@ export function mountMenus(
   }
 
   function currentCssZoom(): number {
-    const rawZoom = document.documentElement.style.zoom || "1";
+    const rawZoom =
+      (document.documentElement.style as CSSStyleDeclaration & { zoom?: string }).zoom || "1";
     const zoom = Number.parseFloat(rawZoom);
     return Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
   }

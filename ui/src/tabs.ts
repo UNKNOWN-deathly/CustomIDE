@@ -16,6 +16,17 @@ export interface TabsBinding {
   openUntitled(): string;
   openTemporaryFile(name: string, content?: string): string;
   openVirtualFile(path: string, name: string, content?: string): void;
+  /**
+   * Open a real on-disk `path` using already-read `content` (e.g. a lossy read
+   * of a binary the user chose to open anyway). Opens clean (not dirty).
+   */
+  openWithContent(path: string, name: string, content: string): void;
+  /**
+   * Insert a clean tab from already-read `content` WITHOUT activating it or
+   * re-rendering. Used to batch-restore many tabs cheaply; caller must call
+   * `render()` and `setActive()` once afterwards.
+   */
+  addBackground(path: string, name: string, content: string): void;
   close(path: string): void;
   renamePath(oldPath: string, newPath: string, newName?: string): void;
   active(): Tab | null;
@@ -81,6 +92,7 @@ export function mountTabs(host: HTMLElement): TabsBinding {
 
   function render() {
     host.innerHTML = "";
+    host.classList.toggle("multi-tab", tabs.size > 1);
     for (const tab of tabs.values()) {
       const el = document.createElement("div");
       el.className =
@@ -100,6 +112,7 @@ export function mountTabs(host: HTMLElement): TabsBinding {
       }
       
       const textSpan = document.createElement("span");
+      textSpan.className = "tab-name";
       textSpan.textContent = tab.name;
       label.appendChild(textSpan);
       el.appendChild(label);
@@ -156,6 +169,17 @@ export function mountTabs(host: HTMLElement): TabsBinding {
         tabs.set(path, { path, name, content, dirty: true });
       }
       api.setActive(path);
+    },
+    openWithContent(path: string, name: string, content: string) {
+      if (!tabs.has(path)) {
+        tabs.set(path, { path, name, content, dirty: false });
+      }
+      api.setActive(path);
+    },
+    addBackground(path: string, name: string, content: string) {
+      if (!tabs.has(path)) {
+        tabs.set(path, { path, name, content, dirty: false });
+      }
     },
     close(path: string) {
       tabs.delete(path);

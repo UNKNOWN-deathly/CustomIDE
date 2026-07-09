@@ -37,6 +37,9 @@ pub enum IdeError {
     #[error("invalid path: {0}")]
     InvalidPath(String),
 
+    #[error("not a text file")]
+    NotTextFile,
+
     #[error("{0}")]
     Other(String),
 }

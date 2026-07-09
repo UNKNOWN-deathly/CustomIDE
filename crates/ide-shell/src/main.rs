@@ -82,6 +82,7 @@ fn main() {
             cmd_workspace_open_files_set,
             cmd_fs_list,
             cmd_fs_read,
+            cmd_fs_read_lossy,
             cmd_fs_write,
             cmd_fs_create_file,
             cmd_fs_create_dir,
@@ -371,12 +372,46 @@ fn same_path(a: &str, b: &str) -> bool {
 
 #[tauri::command(async)]
 fn cmd_fs_list(state: State<'_, AppState>, path: String) -> Result<Vec<DirEntry>, String> {
-    state.fs.list_dir(Path::new(&path)).map_err(to_err)
+    let start = std::time::Instant::now();
+    let res = state.fs.list_dir(Path::new(&path)).map_err(to_err);
+    tracing::info!(
+        target: "customide::fs",
+        path = %path,
+        ok = res.is_ok(),
+        elapsed_ms = start.elapsed().as_millis() as u64,
+        "cmd_fs_list"
+    );
+    res
 }
 
 #[tauri::command(async)]
 fn cmd_fs_read(state: State<'_, AppState>, path: String) -> Result<String, String> {
-    state.fs.read(Path::new(&path)).map_err(to_err)
+    let start = std::time::Instant::now();
+    let res = state.fs.read(Path::new(&path)).map_err(to_err);
+    tracing::info!(
+        target: "customide::fs",
+        path = %path,
+        ok = res.is_ok(),
+        bytes = res.as_ref().map(|s| s.len()).unwrap_or(0),
+        elapsed_ms = start.elapsed().as_millis() as u64,
+        "cmd_fs_read"
+    );
+    res
+}
+
+#[tauri::command(async)]
+fn cmd_fs_read_lossy(state: State<'_, AppState>, path: String) -> Result<String, String> {
+    let start = std::time::Instant::now();
+    let res = state.fs.read_lossy(Path::new(&path)).map_err(to_err);
+    tracing::info!(
+        target: "customide::fs",
+        path = %path,
+        ok = res.is_ok(),
+        bytes = res.as_ref().map(|s| s.len()).unwrap_or(0),
+        elapsed_ms = start.elapsed().as_millis() as u64,
+        "cmd_fs_read_lossy"
+    );
+    res
 }
 
 #[tauri::command(async)]

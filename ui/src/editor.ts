@@ -42,6 +42,11 @@ export interface EditorBinding {
 // user edits (which would mark the tab dirty and re-trigger didChange).
 const ProgrammaticDocSet = Annotation.define<boolean>();
 
+// Above this size (in characters) we open files without language highlighting.
+// The Lezer parser is the dominant cost for large docs; CodeMirror's own line
+// virtualization handles plain text of this size comfortably.
+const LARGE_FILE_PLAIN_THRESHOLD = 1_000_000;
+
 export function mountEditor(parent: HTMLElement, onChange: () => void): EditorBinding {
   const language = new Compartment();
   const view = new EditorView({
@@ -101,8 +106,13 @@ export function mountEditor(parent: HTMLElement, onChange: () => void): EditorBi
     view,
     setDoc(text, filePath) {
       void filePath;
+      // Large files: drop the Lezer language parser. Running Python (Lezer)
+      // highlighting over multi-MB files (e.g. a 19MB HTML) locks the UI. Plain
+      // text has no per-token parse cost, so big files open instantly.
+      const plain = text.length > LARGE_FILE_PLAIN_THRESHOLD;
       view.dispatch({
         changes: { from: 0, to: view.state.doc.length, insert: text },
+        effects: language.reconfigure(plain ? [] : python()),
         annotations: ProgrammaticDocSet.of(true),
       });
       // Reset diagnostics when the document is replaced; the caller is expected

@@ -15,6 +15,82 @@ export interface ConfirmSaveOptions {
   cancelLabel?: string;
 }
 
+export interface ConfirmDialogOptions {
+  title: string;
+  message: string;
+  /** Primary/confirm button label. Defaults to "OK". */
+  confirmLabel?: string;
+  /** Defaults to "Cancel". */
+  cancelLabel?: string;
+}
+
+/**
+ * Simple two-button confirmation. Resolves `true` if the user confirms,
+ * `false` on Cancel / Escape / backdrop click.
+ */
+export function confirmDialog(opts: ConfirmDialogOptions): Promise<boolean> {
+  return new Promise((resolve) => {
+    const backdrop = document.createElement("div");
+    backdrop.className = "modal-backdrop";
+
+    const box = document.createElement("div");
+    box.className = "modal-box";
+
+    const title = document.createElement("h2");
+    title.className = "modal-title";
+    title.textContent = opts.title;
+    box.appendChild(title);
+
+    const body = document.createElement("p");
+    body.className = "modal-body";
+    body.textContent = opts.message;
+    box.appendChild(body);
+
+    const actions = document.createElement("div");
+    actions.className = "modal-actions";
+
+    const settle = (ok: boolean) => {
+      window.removeEventListener("keydown", onKey, true);
+      backdrop.remove();
+      resolve(ok);
+    };
+
+    const cancelBtn = document.createElement("button");
+    cancelBtn.className = "modal-btn";
+    cancelBtn.textContent = opts.cancelLabel ?? "Cancel";
+    cancelBtn.onclick = () => settle(false);
+
+    const confirmBtn = document.createElement("button");
+    confirmBtn.className = "modal-btn primary";
+    confirmBtn.textContent = opts.confirmLabel ?? "OK";
+    confirmBtn.onclick = () => settle(true);
+
+    actions.appendChild(cancelBtn);
+    actions.appendChild(confirmBtn);
+    box.appendChild(actions);
+    backdrop.appendChild(box);
+
+    backdrop.addEventListener("mousedown", (e) => {
+      if (e.target === backdrop) settle(false);
+    });
+
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        settle(false);
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        settle(true);
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+
+    document.body.appendChild(backdrop);
+    confirmBtn.focus();
+  });
+}
+
 export interface PromptNameOptions {
   title: string;
   description?: string;

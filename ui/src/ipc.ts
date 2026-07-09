@@ -99,6 +99,7 @@ export const ipc = {
     }),
   fsList: (path: string) => invoke<DirEntry[]>("cmd_fs_list", { path }),
   fsRead: (path: string) => invoke<string>("cmd_fs_read", { path }),
+  fsReadLossy: (path: string) => invoke<string>("cmd_fs_read_lossy", { path }),
   fsWrite: (path: string, contents: string) =>
     invoke<void>("cmd_fs_write", { path, contents }),
   fsCreateFile: (path: string) => invoke<void>("cmd_fs_create_file", { path }),

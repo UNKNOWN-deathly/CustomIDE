@@ -41,7 +41,24 @@ impl FsService {
     }
 
     pub fn read(&self, path: &Path) -> IdeResult<String> {
-        Ok(std::fs::read_to_string(path)?)
+        match std::fs::read_to_string(path) {
+            Ok(text) => Ok(text),
+            // Non-UTF-8 content (binaries: .so, .pak, executables, …) surfaces
+            // as InvalidData. Report a clean "not a text file" so the editor can
+            // tell the user instead of failing silently.
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                Err(IdeError::NotTextFile)
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Read any file as text, replacing invalid UTF-8 with the replacement
+    /// character. Used when the user explicitly chooses to open a non-text file
+    /// in the built-in editor anyway.
+    pub fn read_lossy(&self, path: &Path) -> IdeResult<String> {
+        let bytes = std::fs::read(path)?;
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
     pub fn write(&self, path: &Path, contents: &str) -> IdeResult<()> {
