@@ -114,15 +114,24 @@ fn cmd_workspace_open(state: State<'_, AppState>, path: String) -> Result<Worksp
     // Tear down any prior session before swapping workspaces.
     state.pyright.stop();
     let info = state.workspace.open(&path).map_err(to_err)?;
-    state.fs.watch(&info.root).ok();
     state.settings.bind_workspace(&info.root).ok();
     state.bus.publish(CoreEvent::WorkspaceOpened {
         root: info.root.clone(),
     });
 
-    // Start Pyright off the Tauri main thread. `initialize` is a blocking LSP
-    // round-trip that previously stalled every other sync command (fs_read,
-    // pty_write, …) and made file opens feel laggy after opening a project.
+    // Recursive notify watches walk the whole tree up front (node_modules,
+    // .git, …). Do that off the command path so "Open Folder" returns as soon
+    // as the workspace root is known and the explorer can paint.
+    {
+        let fs = state.fs.clone();
+        let root = info.root.clone();
+        std::thread::spawn(move || {
+            let _ = fs.watch(&root);
+        });
+    }
+
+    // Start Pyright off the command path. `initialize` is a blocking LSP
+    // round-trip; keeping it here made opens feel laggy even after async IPC.
     if let Some(env) = info.python.clone() {
         let pyright = state.pyright.clone();
         let bus = state.bus.clone();
