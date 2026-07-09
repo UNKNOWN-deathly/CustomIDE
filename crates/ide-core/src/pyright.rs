@@ -21,6 +21,7 @@ use crate::events::{
 use crate::lsp::{LspClient, LspResponder, ServerMessage, path_to_uri, uri_to_path};
 use crate::python_env::PythonEnv;
 
+#[derive(Clone)]
 pub struct PyrightManager {
     bus: EventBus,
     inner: Arc<Mutex<Option<Session>>>,

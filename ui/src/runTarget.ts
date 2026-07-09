@@ -3,6 +3,10 @@ import type { Tab } from "./tabs";
 
 const ENTRYPOINT_NAMES = new Set(["main.py", "app.py", "run.py", "manage.py", "cli.py", "__main__.py"]);
 const SKIP_DIRS = new Set([".git", ".venv", "venv", "node_modules", "target", "dist", "build", "__pycache__"]);
+
+function shouldSkipDir(name: string) {
+  return SKIP_DIRS.has(name.toLowerCase());
+}
 const MAX_CANDIDATE_READS = 24;
 
 export interface RunTargetSuggestion {
@@ -85,7 +89,7 @@ async function findEntrypointCandidate(
 
 async function collectCandidates(workspace: WorkspaceInfo): Promise<Candidate[]> {
   const rootEntries = await safeList(workspace.root);
-  const firstLevelDirs = rootEntries.filter((entry) => entry.is_dir && !SKIP_DIRS.has(entry.name.toLowerCase()));
+  const firstLevelDirs = rootEntries.filter((entry) => entry.is_dir && !shouldSkipDir(entry.name));
   const files = rootEntries.filter((entry) => !entry.is_dir);
 
   for (const dir of firstLevelDirs) {

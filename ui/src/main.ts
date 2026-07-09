@@ -2,6 +2,7 @@
 // every notification is a backend event.
 
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { documentDir } from "@tauri-apps/api/path";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 
@@ -46,6 +47,10 @@ interface TempWorkspace {
 
 async function bootstrap() {
   let activePtyId: string | null = null;
+  /** Whether the active PTY is an interactive shell or a one-shot Run. */
+  let activePtyKind: "shell" | "run" | null = null;
+  /** After a Run finishes, reopen a shell if the user was in shell mode before. */
+  let restoreShellAfterRun = false;
   let changeTimer: number | null = null;
   let terminalFocused = false;
 
@@ -116,6 +121,13 @@ async function bootstrap() {
   let recentProjects: RecentProject[] = [];
   let scratchWorkspace: TempWorkspace | null = null;
   let scratchWorkspaceCounter = 0;
+  /** Active frictionless-run snapshot at ~/Documents/run_temp_, if any. */
+  let activeRunTempDir: string | null = null;
+  const RUN_TEMP_DIR_NAME = "run_temp_";
+
+  function sleep(ms: number) {
+    return new Promise<void>((resolve) => setTimeout(resolve, ms));
+  }
 
   function getLocalRecentProjects(): RecentProject[] {
     try {
@@ -131,7 +143,22 @@ async function bootstrap() {
     return [];
   }
 
+  /** Keep only recent project folders that still exist on disk. */
+  async function pruneMissingRecentProjects(projects: RecentProject[]): Promise<RecentProject[]> {
+    const kept: RecentProject[] = [];
+    for (const project of projects) {
+      try {
+        await ipc.fsList(project.path);
+        kept.push(project);
+      } catch {
+        debugRecentProjects("pruned missing recent project", { path: project.path });
+      }
+    }
+    return kept;
+  }
+
   async function loadRecentProjects() {
+    let migratedFromLocal = false;
     try {
       recentProjects = trimRecentProjects(await ipc.recentProjectsGet());
       debugRecentProjects("loaded from backend", {
@@ -146,12 +173,19 @@ async function bootstrap() {
         });
         if (local.length > 0) {
           recentProjects = trimRecentProjects(local);
-          await persistRecentProjects();
+          migratedFromLocal = true;
         }
       }
     } catch (e) {
       console.error("Error loading recent projects", e);
       recentProjects = trimRecentProjects(getLocalRecentProjects());
+      migratedFromLocal = recentProjects.length > 0;
+    }
+
+    const before = recentProjects.length;
+    recentProjects = trimRecentProjects(await pruneMissingRecentProjects(recentProjects));
+    if (migratedFromLocal || recentProjects.length !== before) {
+      await persistRecentProjects();
     }
   }
 
@@ -202,6 +236,189 @@ async function bootstrap() {
 
   function basename(path: string) {
     return path.split(/[\\/]/).pop() ?? path;
+  }
+
+  function dirname(path: string) {
+    const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
+    const idx = normalized.lastIndexOf("/");
+    if (idx <= 0) return ".";
+    return normalized.slice(0, idx);
+  }
+
+  function relativeToWorkspace(path: string, workspaceRoot: string) {
+    const root = workspaceRoot.replace(/[\\/]+$/, "");
+    const rootNorm = normPath(root);
+    const fileNorm = normPath(path);
+    if (fileNorm === rootNorm) return "";
+    if (fileNorm.startsWith(`${rootNorm}/`)) {
+      return path.slice(root.length).replace(/^[\\/]+/, "");
+    }
+    return null;
+  }
+
+  function isRunTempPath(path: string) {
+    return /(?:^|[\\/])run_temp_(?:[\\/]|$)/i.test(path);
+  }
+
+  async function resolveRunTempDir(): Promise<string> {
+    const docs = await documentDir();
+    return joinPath(docs, RUN_TEMP_DIR_NAME);
+  }
+
+  async function stopActiveRunner() {
+    if (!activePtyId) return;
+    const id = activePtyId;
+    activePtyId = null;
+    activePtyKind = null;
+    terminal.detachSession();
+    try {
+      await ipc.ptyClose(id);
+    } catch {
+      try {
+        await ipc.processKill(id);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  /** Open (or replace with) an interactive shell PTY. Default terminal mode. */
+  async function openShell(opts?: { focus?: boolean }) {
+    const focus = opts?.focus !== false;
+    restoreShellAfterRun = false;
+    await stopActiveRunner();
+    showBottom("terminal", focus);
+    terminal.fit();
+    try {
+      const dims = terminal.dimensions();
+      const { id } = await ipc.ptyOpen(dims);
+      activePtyId = id;
+      activePtyKind = "shell";
+      terminal.attachSession(id, { kind: "shell" });
+      if (!focus) {
+        // attachSession focuses the terminal; return focus to the editor on boot.
+        editor.focus();
+      }
+    } catch (e) {
+      terminal.log(`shell failed: ${String(e)}`);
+    }
+  }
+
+  /**
+   * Recursively delete ~/Documents/run_temp_. Stops an active *run* PTY first so
+   * file locks from a just-finished process don't block deletion; does not kill
+   * an interactive shell. Backend remove also retries with backoff.
+   */
+  async function cleanupRunTempDir() {
+    const tracked = activeRunTempDir;
+    activeRunTempDir = null;
+    // Only stop a one-shot run process that may still hold locks on run_temp_.
+    // An interactive shell must stay alive across cleanup / subsequent Runs.
+    if (tracked && activePtyKind === "run") {
+      await stopActiveRunner();
+    }
+
+    let dir = tracked;
+    if (!dir) {
+      try {
+        dir = await resolveRunTempDir();
+      } catch {
+        return;
+      }
+    }
+
+    let delay = 40;
+    for (let attempt = 0; attempt < 8; attempt++) {
+      try {
+        await ipc.fsRemove(dir);
+        return;
+      } catch {
+        await sleep(delay);
+        delay = Math.min(delay * 2, 800);
+      }
+    }
+  }
+
+  /**
+   * Snapshot every open editor buffer into absolute `~/Documents/run_temp_/`
+   * and return the absolute path of `runPath` inside that folder (plus the folder).
+   * Does not write to the user's real project files.
+   */
+  async function prepareRunTempSnapshot(runPath: string): Promise<{ runFile: string; runDir: string } | null> {
+    // Flush the active editor into the tab model before snapshotting.
+    tabs.updateActiveContent(editor.getDoc());
+    syncActiveScratchFile();
+
+    await cleanupRunTempDir();
+
+    const runDir = await resolveRunTempDir();
+    await ipc.fsCreateDir(runDir);
+
+    const usedNames = new Map<string, number>();
+    let mappedRunFile: string | null = null;
+    const workspaceRoot = currentWorkspace?.root ?? scratchWorkspace?.rootPath ?? null;
+
+    for (const tab of tabs.all()) {
+      let destRel: string;
+      if (isTemporaryPath(tab.path) || isRunTempPath(tab.path)) {
+        const base = tab.name || basename(tab.path) || "untitled.py";
+        const count = usedNames.get(base) ?? 0;
+        usedNames.set(base, count + 1);
+        destRel = count === 0 ? base : `${base.replace(/(\.[^.]+)?$/, `_${count}$1`)}`;
+      } else if (workspaceRoot) {
+        const rel = relativeToWorkspace(tab.path, workspaceRoot);
+        destRel = rel && rel.length > 0 ? rel : basename(tab.path);
+      } else {
+        destRel = basename(tab.path);
+      }
+
+      const destAbs = joinPath(runDir, destRel);
+      const parent = dirname(destAbs);
+      if (parent && parent !== runDir && !samePathLoose(parent, runDir)) {
+        await ipc.fsCreateDir(parent);
+      }
+      await ipc.fsWrite(destAbs, tab.content);
+
+      if (normPath(tab.path) === normPath(runPath)) {
+        mappedRunFile = destAbs;
+      }
+    }
+
+    if (!mappedRunFile) {
+      // Run target wasn't an open tab (e.g. suggested entrypoint) — copy from disk.
+      try {
+        const text = await ipc.fsRead(runPath);
+        let destRel: string;
+        if (workspaceRoot) {
+          const rel = relativeToWorkspace(runPath, workspaceRoot);
+          destRel = rel && rel.length > 0 ? rel : basename(runPath);
+        } else {
+          destRel = basename(runPath);
+        }
+        const destAbs = joinPath(runDir, destRel);
+        const parent = dirname(destAbs);
+        if (parent && !samePathLoose(parent, runDir)) {
+          await ipc.fsCreateDir(parent);
+        }
+        await ipc.fsWrite(destAbs, text);
+        mappedRunFile = destAbs;
+      } catch (e) {
+        terminal.log(`run snapshot failed: could not read ${runPath}: ${String(e)}`);
+        try {
+          await ipc.fsRemove(runDir);
+        } catch {
+          /* ignore */
+        }
+        return null;
+      }
+    }
+
+    activeRunTempDir = runDir;
+    return { runFile: mappedRunFile, runDir };
+  }
+
+  function samePathLoose(a: string, b: string) {
+    return normPath(a.replace(/[\\/]+$/, "")) === normPath(b.replace(/[\\/]+$/, ""));
   }
 
   function replacePathPrefix(path: string, oldPrefix: string, newPrefix: string) {
@@ -449,6 +666,7 @@ async function bootstrap() {
     if (!skipUnsavedConfirm && !(await confirmDiscardAllUnsaved("Switching workspace will close all open files."))) {
       return false;
     }
+    await cleanupRunTempDir();
     // Drop any leftover tabs (untitled or dirty) before swapping workspace.
     for (const tab of tabs.all()) {
       tabs.close(tab.path);
@@ -466,7 +684,8 @@ async function bootstrap() {
       await explorer.setRoot(info.root);
       terminal.log(
         `Workspace opened: ${info.root}` +
-          (info.python ? ` (python: ${info.python.version ?? "?"})` : "")
+          (info.python ? ` (python: ${info.python.version ?? "?"})` : ""),
+        { newPrompt: true }
       );
       await addToRecentProjects(info.root, info.name);
       if (restoreLastActiveFile) {
@@ -475,7 +694,7 @@ async function bootstrap() {
       renderEmptyState();
       return true;
     } catch (e) {
-      terminal.log(`Failed to open workspace: ${String(e)}`);
+      terminal.log(`Failed to open workspace: ${String(e)}`, { newPrompt: true });
       return false;
     }
   }
@@ -522,6 +741,7 @@ async function bootstrap() {
     if (!(await confirmDiscardAllUnsaved("Starting a scratch workspace will close current open files."))) {
       return;
     }
+    await cleanupRunTempDir();
     for (const tab of tabs.all()) {
       tabs.close(tab.path);
     }
@@ -819,6 +1039,7 @@ async function bootstrap() {
     });
     if (decision === "cancel") return false;
     if (decision === "discard") {
+      await cleanupRunTempDir();
       tabs.close(path);
       return true;
     }
@@ -828,6 +1049,7 @@ async function bootstrap() {
     if (!wasActive) tabs.setActive(path);
     const saved = await saveActiveWithDialog();
     if (!saved) return false;
+    await cleanupRunTempDir();
     if (tabs.all().some((t) => t.path === path)) {
       tabs.close(path);
     } else if (!wasScratch) {
@@ -970,9 +1192,14 @@ async function bootstrap() {
 
   async function resolveBulkDecision(decision: SaveDecision, dirty: Tab[]): Promise<boolean> {
     if (decision === "cancel") return false;
-    if (decision === "discard") return true;
+    if (decision === "discard") {
+      await cleanupRunTempDir();
+      return true;
+    }
     if (scratchWorkspace) {
-      return saveScratchWorkspace();
+      const ok = await saveScratchWorkspace();
+      if (ok) await cleanupRunTempDir();
+      return ok;
     }
     // Save each. For untitled tabs the save dialog opens; cancel aborts.
     for (const t of dirty) {
@@ -980,6 +1207,7 @@ async function bootstrap() {
       const ok = await saveActiveWithDialog();
       if (!ok) return false;
     }
+    await cleanupRunTempDir();
     return true;
   }
 
@@ -1029,6 +1257,7 @@ async function bootstrap() {
     handlingCloseRequest = true;
     try {
       if (!hasUnsavedWork() || await confirmDiscardAllUnsaved("The IDE is closing.")) {
+        await cleanupRunTempDir();
         await getCurrentWindow().destroy();
       }
     } catch (e) {
@@ -1295,50 +1524,45 @@ async function bootstrap() {
   });
 
   $("btn-shell").onclick = async () => {
-    if (activePtyId) {
-      ipc.ptyClose(activePtyId).catch(() => {});
-      activePtyId = null;
-      terminal.detachSession();
-    }
-    showBottom("terminal");
-    terminal.fit();
-    try {
-      const dims = terminal.dimensions();
-      const { id } = await ipc.ptyOpen(dims);
-      activePtyId = id;
-      terminal.attachSession(id);
-    } catch (e) {
-      terminal.log(`shell failed: ${String(e)}`);
-    }
+    await openShell();
   };
 
   async function runFile(path: string) {
-    if (isTemporaryPath(path)) {
-      const saved = await saveActiveWithDialog();
-      if (!saved) return;
-      const savedActive = tabs.active();
-      if (!savedActive || isTemporaryPath(savedActive.path)) return;
-      path = savedActive.path;
+    // Remember prior mode before snapshot/cleanup so a restored shell isn't
+    // mis-classified after prepareRunTempSnapshot touches PTYs.
+    restoreShellAfterRun = activePtyKind === "shell";
+
+    // Frictionless run: snapshot open buffers into ~/Documents/run_temp_/
+    // and execute from there — no manual save required.
+    const snapshot = await prepareRunTempSnapshot(path);
+    if (!snapshot) {
+      if (restoreShellAfterRun && activePtyKind !== "shell") {
+        restoreShellAfterRun = false;
+        await openShell();
+      }
+      return;
     }
-    const active = tabs.active();
-    if (active && normPath(active.path) === normPath(path) && active.dirty) {
-      await tabs.saveActive(editor.getDoc());
-    }
+
+    // Close any existing PTY before attaching the run session.
     if (activePtyId) {
-      ipc.ptyClose(activePtyId).catch(() => {});
-      activePtyId = null;
-      terminal.detachSession();
+      await stopActiveRunner();
     }
+
     showBottom("terminal");
     terminal.fit();
     try {
       const dims = terminal.dimensions();
-      const { id } = await ipc.pythonRun(path, [], dims);
+      const { id } = await ipc.pythonRun(snapshot.runFile, [], dims, snapshot.runDir);
       activePtyId = id;
-      terminal.attachSession(id);
+      activePtyKind = "run";
+      terminal.attachSession(id, { kind: "run" });
       rememberRunTarget(currentWorkspace, path);
     } catch (e) {
       terminal.log(`run failed: ${String(e)}`);
+      if (restoreShellAfterRun) {
+        restoreShellAfterRun = false;
+        await openShell();
+      }
     }
   }
 
@@ -1346,7 +1570,7 @@ async function bootstrap() {
     hideRunTargetPopover();
     const active = tabs.active();
     if (!active) {
-      terminal.log("No file open.");
+      terminal.log("No file open.", { newPrompt: true });
       return;
     }
 
@@ -1386,7 +1610,7 @@ async function bootstrap() {
       problems.setEntries([...live, ...ruffEntries]);
       showBottom("problems");
     } catch (e) {
-      terminal.log(`ruff failed: ${String(e)}`);
+      terminal.log(`ruff failed: ${String(e)}`, { newPrompt: true });
       showBottom("terminal");
     }
   };
@@ -1420,6 +1644,12 @@ async function bootstrap() {
 
     if (evt.kind === "process_exited" && evt.id === activePtyId) {
       activePtyId = null;
+      const wasRun = activePtyKind === "run";
+      activePtyKind = null;
+      if (wasRun && restoreShellAfterRun) {
+        restoreShellAfterRun = false;
+        void openShell();
+      }
     }
 
     if (evt.kind === "diagnostics" && evt.source === "pyright") {
@@ -1438,6 +1668,7 @@ async function bootstrap() {
     }
 
     if (evt.kind === "workspace_closed") {
+      void cleanupRunTempDir();
       currentWorkspace = null;
       scratchWorkspace = null;
       explorer.clearScratchRoot();
@@ -1450,7 +1681,7 @@ async function bootstrap() {
 
     if (evt.kind === "log") {
       const prefix = evt.level === "error" ? "ERR" : evt.level === "warn" ? "WARN" : "INFO";
-      terminal.log(`[${prefix}] ${evt.message}`);
+      terminal.log(`[${prefix}] ${evt.message}`, { newPrompt: true });
     }
   }
 
@@ -1604,6 +1835,10 @@ async function bootstrap() {
   refreshProblems(); // render empty placeholder
   await loadRecentProjects();
   renderEmptyState();
+
+  // Default terminal mode: interactive shell (not a dead non-interactive pane).
+  // Don't steal editor focus on boot.
+  await openShell({ focus: false });
 
   // Block the window from closing if there are unsaved changes.
   // IMPORTANT: event.preventDefault() must be called synchronously before

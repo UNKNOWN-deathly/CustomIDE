@@ -11,7 +11,7 @@ use notify_debouncer_full::{DebouncedEvent, new_debouncer};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-use crate::errors::IdeResult;
+use crate::errors::{IdeError, IdeResult};
 use crate::events::{Event, EventBus};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,12 +69,32 @@ impl FsService {
     }
 
     pub fn remove(&self, path: &Path) -> IdeResult<()> {
-        if path.is_dir() {
-            std::fs::remove_dir_all(path)?;
-        } else {
-            std::fs::remove_file(path)?;
+        // Retry/backoff so deletion can succeed when a just-finished runner
+        // still briefly holds a file lock under the path (common on Windows).
+        let mut delay = Duration::from_millis(40);
+        let mut last_err: Option<std::io::Error> = None;
+        for _ in 0..8 {
+            if !path.exists() {
+                return Ok(());
+            }
+            let result = if path.is_dir() {
+                std::fs::remove_dir_all(path)
+            } else {
+                std::fs::remove_file(path)
+            };
+            match result {
+                Ok(()) => return Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(e) => {
+                    last_err = Some(e);
+                    std::thread::sleep(delay);
+                    delay = (delay.saturating_mul(2)).min(Duration::from_millis(800));
+                }
+            }
         }
-        Ok(())
+        Err(last_err
+            .map(Into::into)
+            .unwrap_or_else(|| IdeError::other("remove failed")))
     }
 
     pub fn rename(&self, from: &Path, to: &Path) -> IdeResult<()> {

@@ -109,10 +109,11 @@ export const ipc = {
   pythonRun: (
     file: string,
     args: string[] = [],
-    dims?: { cols: number; rows: number }
+    dims?: { cols: number; rows: number },
+    cwd?: string
   ) =>
     invoke<{ id: string; interpreter: string }>("cmd_python_run", {
-      payload: { file, args, cols: dims?.cols, rows: dims?.rows },
+      payload: { file, args, cols: dims?.cols, rows: dims?.rows, cwd },
     }),
   ptyOpen: (dims?: { cols: number; rows: number }) =>
     invoke<{ id: string }>("cmd_pty_open", {

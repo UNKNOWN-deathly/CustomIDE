@@ -109,7 +109,7 @@ fn to_err<E: std::fmt::Display>(e: E) -> String {
 
 // ---------- Workspace ----------
 
-#[tauri::command]
+#[tauri::command(async)]
 fn cmd_workspace_open(state: State<'_, AppState>, path: String) -> Result<WorkspaceInfo, String> {
     // Tear down any prior session before swapping workspaces.
     state.pyright.stop();
@@ -120,21 +120,26 @@ fn cmd_workspace_open(state: State<'_, AppState>, path: String) -> Result<Worksp
         root: info.root.clone(),
     });
 
-    // Best-effort: start Pyright if we have a python env and the binary is on PATH.
-    if let Some(env) = &info.python {
-        match state.pyright.start(&info.root, env) {
-            Ok(()) => state.bus.publish(CoreEvent::Log {
+    // Start Pyright off the Tauri main thread. `initialize` is a blocking LSP
+    // round-trip that previously stalled every other sync command (fs_read,
+    // pty_write, …) and made file opens feel laggy after opening a project.
+    if let Some(env) = info.python.clone() {
+        let pyright = state.pyright.clone();
+        let bus = state.bus.clone();
+        let root = info.root.clone();
+        std::thread::spawn(move || match pyright.start(&root, &env) {
+            Ok(()) => bus.publish(CoreEvent::Log {
                 level: LogLevel::Info,
                 message: "pyright started".into(),
             }),
-            Err(e) => state.bus.publish(CoreEvent::Log {
+            Err(e) => bus.publish(CoreEvent::Log {
                 level: LogLevel::Warn,
                 message: format!(
                     "pyright not started ({}). Install with `npm i -g pyright` or `pip install pyright` to enable live diagnostics.",
                     e
                 ),
             }),
-        }
+        });
     } else {
         state.bus.publish(CoreEvent::Log {
             level: LogLevel::Warn,
@@ -355,32 +360,32 @@ fn same_path(a: &str, b: &str) -> bool {
 
 // ---------- FS ----------
 
-#[tauri::command]
+#[tauri::command(async)]
 fn cmd_fs_list(state: State<'_, AppState>, path: String) -> Result<Vec<DirEntry>, String> {
     state.fs.list_dir(Path::new(&path)).map_err(to_err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn cmd_fs_read(state: State<'_, AppState>, path: String) -> Result<String, String> {
     state.fs.read(Path::new(&path)).map_err(to_err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn cmd_fs_write(state: State<'_, AppState>, path: String, contents: String) -> Result<(), String> {
     state.fs.write(Path::new(&path), &contents).map_err(to_err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn cmd_fs_create_file(state: State<'_, AppState>, path: String) -> Result<(), String> {
     state.fs.create_file(Path::new(&path)).map_err(to_err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn cmd_fs_create_dir(state: State<'_, AppState>, path: String) -> Result<(), String> {
     state.fs.create_dir(Path::new(&path)).map_err(to_err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn cmd_fs_rename(state: State<'_, AppState>, from: String, to: String) -> Result<(), String> {
     state
         .fs
@@ -388,7 +393,7 @@ fn cmd_fs_rename(state: State<'_, AppState>, from: String, to: String) -> Result
         .map_err(to_err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn cmd_fs_remove(state: State<'_, AppState>, path: String) -> Result<(), String> {
     state.fs.remove(Path::new(&path)).map_err(to_err)
 }
@@ -410,6 +415,9 @@ struct PtyRunArgs {
     cols: Option<u16>,
     #[serde(default)]
     rows: Option<u16>,
+    /// When set, the PTY cwd for the run. Defaults to the workspace root.
+    #[serde(default)]
+    cwd: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -428,13 +436,23 @@ struct PtyOpenResult {
 // Run File goes through the PTY so input() / interactive REPLs work.
 // Returns the PTY session id as `id` (same shape as before) — the frontend
 // reuses this id for cmd_pty_write / cmd_pty_resize / cmd_pty_close.
-#[tauri::command]
+#[tauri::command(async)]
 fn cmd_python_run(
     state: State<'_, AppState>,
     payload: PtyRunArgs,
 ) -> Result<PythonRunResult, String> {
-    let root = state.workspace.root().map_err(to_err)?;
-    let env = python_env::detect(&root).map_err(to_err)?;
+    // Prefer the open workspace for interpreter detection (venv/.python), but
+    // allow frictionless runs from ~/Documents/run_temp_ without a workspace.
+    let workspace_root = state.workspace.current().map(|w| w.root);
+    let detect_root = workspace_root
+        .clone()
+        .or_else(|| payload.cwd.clone())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let env = python_env::detect(&detect_root).map_err(to_err)?;
+    let cwd = payload
+        .cwd
+        .or(workspace_root)
+        .unwrap_or_else(|| detect_root.clone());
     // `-u` keeps stdout/stderr unbuffered so prompts appear immediately even
     // inside ConPTY's chunking. Python still sees a real TTY (isatty=true).
     let mut args = vec!["-u".to_string(), payload.file.clone()];
@@ -444,7 +462,7 @@ fn cmd_python_run(
         .open(PtySpec {
             program: Some(env.interpreter.to_string_lossy().into_owned()),
             args,
-            cwd: Some(root.clone()),
+            cwd: Some(cwd),
             cols: payload.cols.unwrap_or(120),
             rows: payload.rows.unwrap_or(30),
             env: vec![],
@@ -456,7 +474,7 @@ fn cmd_python_run(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn cmd_pty_open(
     state: State<'_, AppState>,
     payload: Option<PtyOpenArgs>,
@@ -483,7 +501,7 @@ fn cmd_pty_open(
 
 // Non-interactive process kill (kept for ProcessRunner-spawned jobs). For PTY
 // sessions call cmd_pty_close, which terminates the child via Drop.
-#[tauri::command]
+#[tauri::command(async)]
 fn cmd_process_kill(state: State<'_, AppState>, id: String) -> Result<bool, String> {
     if state.runner.kill(&id).unwrap_or(false) {
         return Ok(true);
@@ -493,7 +511,7 @@ fn cmd_process_kill(state: State<'_, AppState>, id: String) -> Result<bool, Stri
 
 // ---------- PTY input / sizing ----------
 
-#[tauri::command]
+#[tauri::command(async)]
 fn cmd_pty_write(state: State<'_, AppState>, id: String, data: String) -> Result<(), String> {
     tracing::debug!(
         target: "customide::pty",
@@ -505,7 +523,7 @@ fn cmd_pty_write(state: State<'_, AppState>, id: String, data: String) -> Result
     state.pty.write(&id, data.as_bytes()).map_err(to_err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn cmd_pty_resize(
     state: State<'_, AppState>,
     id: String,
@@ -515,7 +533,7 @@ fn cmd_pty_resize(
     state.pty.resize(&id, cols, rows).map_err(to_err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn cmd_pty_close(state: State<'_, AppState>, id: String) -> Result<bool, String> {
     Ok(state.pty.close(&id))
 }
@@ -528,7 +546,7 @@ struct RuffArgs {
     files: Vec<String>,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn cmd_ruff_check(
     state: State<'_, AppState>,
     payload: Option<RuffArgs>,
@@ -551,14 +569,14 @@ fn cmd_ruff_check(
 
 // ---------- Document lifecycle (forwarded to Pyright) ----------
 
-#[tauri::command]
+#[tauri::command(async)]
 fn cmd_doc_did_open(state: State<'_, AppState>, path: String, text: String) -> Result<(), String> {
     // Best-effort: never error the UI just because pyright isn't running.
     let _ = state.pyright.did_open(Path::new(&path), &text);
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn cmd_doc_did_change(
     state: State<'_, AppState>,
     path: String,
@@ -568,7 +586,7 @@ fn cmd_doc_did_change(
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn cmd_doc_did_save(
     state: State<'_, AppState>,
     path: String,
@@ -578,7 +596,7 @@ fn cmd_doc_did_save(
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn cmd_doc_did_close(state: State<'_, AppState>, path: String) -> Result<(), String> {
     let _ = state.pyright.did_close(Path::new(&path));
     Ok(())

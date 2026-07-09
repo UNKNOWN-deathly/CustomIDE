@@ -19,8 +19,14 @@ const BASE_FONT_SIZE = 13;
 export interface TerminalBinding {
   applyEvent(evt: CoreEvent): void;
   clear(): void;
-  log(line: string): void;
-  attachSession(id: string): void;
+  /**
+   * Write a status line into the terminal.
+   * When `newPrompt` is set and a PTY session is attached, start on a fresh
+   * line and send Enter so the shell reprints a usable prompt below the message.
+   */
+  log(line: string, opts?: { newPrompt?: boolean }): void;
+  /** Attach a PTY. Shell sessions omit the `> /path/to/shell` start banner. */
+  attachSession(id: string, opts?: { kind?: "shell" | "run" }): void;
   detachSession(): void;
   focus(): void;
   /** Current xterm dimensions; used to size a new PTY at spawn time. */
@@ -69,6 +75,8 @@ export function mountTerminal(host: HTMLElement): TerminalBinding {
   term.open(host);
 
   let sessionId: string | null = null;
+  /** Interactive shell vs one-shot Run — shells hide the process_started banner. */
+  let sessionKind: "shell" | "run" | null = null;
   let resizeHandler: ((cols: number, rows: number) => void) | null = null;
   let focusHandler: ((focused: boolean) => void) | null = null;
   let focused = false;
@@ -181,14 +189,20 @@ export function mountTerminal(host: HTMLElement): TerminalBinding {
   function renderProcessEvent(evt: Extract<CoreEvent, { id: string }>) {
     switch (evt.kind) {
       case "process_started":
-        term.write(`\x1b[32m> ${evt.cmd}\x1b[0m\r\n`);
+        // Shell sessions: skip `> /usr/bin/nu` (or whatever $SHELL is).
+        // Run sessions still show the command line for clarity.
+        if (sessionKind !== "shell") {
+          term.write(`\x1b[32m> ${evt.cmd}\x1b[0m\r\n`);
+        }
         break;
       case "process_output":
         term.write(evt.line);
         break;
       case "process_exited":
-        term.write(`\r\n\x1b[2m[exit ${evt.code ?? "?"}]\x1b[0m\r\n`);
-        if (sessionId && evt.id === sessionId) sessionId = null;
+        if (sessionId && evt.id === sessionId) {
+          sessionId = null;
+          sessionKind = null;
+        }
         break;
     }
   }
@@ -214,12 +228,26 @@ export function mountTerminal(host: HTMLElement): TerminalBinding {
     clear() {
       term.clear();
     },
-    log(line) {
-      term.write(`\x1b[32m${line}\x1b[0m${line.endsWith("\n") ? "" : "\r\n"}`);
+    log(line, opts) {
+      const text = line.endsWith("\n") ? line.slice(0, -1) : line;
+      if (opts?.newPrompt && sessionId) {
+        // Must go through the PTY. Local term.write + Enter desyncs the cursor
+        // and the shell redraws over / erases the message. A shell comment
+        // leaves the text on its own line and yields a fresh prompt below.
+        const safe = text.replace(/[\r\n#]/g, " ").trim();
+        void ipc.ptyWrite(sessionId, `\x15# ${safe}\r`);
+        return;
+      }
+      term.write(`\x1b[32m${text}\x1b[0m\r\n`);
     },
-    attachSession(id) {
-      debugInput("attachSession", { id, pending: pendingEvents.get(id)?.length ?? 0 });
+    attachSession(id, opts) {
+      debugInput("attachSession", {
+        id,
+        kind: opts?.kind ?? "run",
+        pending: pendingEvents.get(id)?.length ?? 0,
+      });
       sessionId = id;
+      sessionKind = opts?.kind ?? "run";
       lastResize = null;
       const pending = pendingEvents.get(id) ?? [];
       pendingEvents.clear();
@@ -232,6 +260,7 @@ export function mountTerminal(host: HTMLElement): TerminalBinding {
     detachSession() {
       debugInput("detachSession", { sessionId });
       sessionId = null;
+      sessionKind = null;
     },
     focus() {
       term.focus();

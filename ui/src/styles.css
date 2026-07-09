@@ -760,10 +760,12 @@ body.resizing #bottom-content {
   margin-bottom: 2px;
   flex-shrink: 0;
 }
-.empty-state-logo svg {
-  color: #3a3a3d;
+.empty-state-logo img {
   width: 80px;
   height: 80px;
+  border-radius: 16px;
+  object-fit: cover;
+  display: block;
 }
 #editor-empty-state h1 {
   margin: 0;
@@ -1032,9 +1034,10 @@ body[data-welcome-zoom-tier="very-small"] .empty-action-btn {
   .empty-state-container {
     gap: 10px;
   }
-  .empty-state-logo svg {
+  .empty-state-logo img {
     width: 64px;
     height: 64px;
+    border-radius: 12px;
   }
   #editor-empty-state h1 {
     font-size: 18px;
@@ -1065,9 +1068,10 @@ body[data-welcome-zoom-tier="very-small"] .empty-action-btn {
   .empty-state-container {
     gap: 8px;
   }
-  .empty-state-logo svg {
+  .empty-state-logo img {
     width: 48px;
     height: 48px;
+    border-radius: 10px;
   }
   #editor-empty-state h1 {
     font-size: 16px;
