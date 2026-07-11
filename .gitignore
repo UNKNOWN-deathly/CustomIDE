@@ -14,7 +14,7 @@
 .cursor/
 .junie/
 .ai/
-
+target/
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs
 
