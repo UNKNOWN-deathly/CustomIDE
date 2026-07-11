@@ -15,6 +15,7 @@
 .junie/
 .ai/
 target/
+.venv/
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs
 
